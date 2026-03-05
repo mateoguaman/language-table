@@ -7,13 +7,14 @@ Language-Table is a suite of human-collected datasets and a multi-task continuou
 
 ## Installation
 
-Installation with `pip`. `requirements.txt` contains dependencies for running
-the environment and simple dataset examples.
+Installation with [uv](https://docs.astral.sh/uv/). `requirements.txt`
+contains dependencies for running the environment and simple dataset examples.
 
 ```
-python3 -m venv ./ltvenv
+uv venv --python 3.10 ./ltvenv
 source ./ltvenv/bin/activate
-pip install -r ./requirements.txt
+uv pip install -r ./requirements.txt
+uv pip install --no-deps git+https://github.com/google-research/scenic.git@ae21d9e884015aa7bc7cf1d489af53d16c249726
 export PYTHONPATH=${PWD}:$PYTHONPATH
 ```
 
@@ -21,9 +22,9 @@ For running the full train script, install using `requirements_static.txt`, as
 this contains pinned versions for running the full train script.
 
 ```
-python3 -m venv ./ltvenvtrain
+uv venv --python 3.10 ./ltvenvtrain
 source ./ltvenvtrain/bin/activate
-pip install --no-deps -r ./requirements_static.txt
+uv pip install --no-deps -r ./requirements_static.txt
 export PYTHONPATH=${PWD}:$PYTHONPATH
 ```
 ## Quickstart
@@ -126,6 +127,114 @@ language_table_separate_oracle_sim | [gs://gresearch/robotics/language_table_sep
 Name | Config | Checkpoint Location
 -----| -------| -------------------
 BC+ResNet Sim| language_table/train/configs/language_table_resnet_sim_local.py | [gs://gresearch/robotics/language_table_checkpoints/bc_resnet_sim_checkpoint_955000](https://storage.googleapis.com/gresearch/robotics/language_table_checkpoints/bc_resnet_sim_checkpoint_955000)
+
+## LaMer Integration
+
+The `language_table/lamer/` module integrates this environment into the
+[LaMer](https://github.com/mlbio-epfl/LaMer) meta-RL training framework.
+Because the two codebases have incompatible dependencies (`gym==0.23` here vs
+`gym==0.26.2` in LaMer), the environments run in a **separate process** and
+communicate with LaMer over TCP using a pickle-based protocol.
+
+### Architecture
+
+```
+LaMer process (lamer venv)              language-table process (ltvenv)
+┌──────────────────────────┐            ┌──────────────────────────────┐
+│  PPO Trainer             │            │  server_main.py              │
+│    └─ RemoteEnvManager ──┼── TCP ───► │    └─ EnvServer              │
+│       (client.py)        │            │       └─ LTEnvironmentMgr    │
+│                          │            │           └─ MultiProcessEnv │
+│                          │            │               └─ Ray workers │
+│                          │            │                  └─ PyBullet │
+└──────────────────────────┘            └──────────────────────────────┘
+```
+
+
+### Running the test suite
+
+```bash
+# Run default tests (single env, state-to-text, env manager, parallel)
+python -m language_table.lamer.test_standalone --num_envs 4 --num_steps 50
+
+# Run scaling sweep (1/2/4/8 envs throughput)
+python -m language_table.lamer.test_standalone --scaling_sweep
+
+# Run server round-trip test
+python -m language_table.lamer.test_standalone --test_server
+```
+
+Test renders (PNG frames + MP4 video) are saved to `/tmp/lt_renders/` by default
+(override with `--output_dir`).
+
+### Starting the remote env server (for LaMer)
+
+```bash
+# Training server (e.g. 8 envs on port 50051)
+ltvenv/bin/python -m language_table.lamer.server_main \
+    --host 0.0.0.0 --port 50051 \
+    --num_envs 8 --block_mode BLOCK_4 \
+    --max_inner_steps 100 --num_attempts 3
+
+# Validation server (e.g. 16 envs on port 50052)
+ltvenv/bin/python -m language_table.lamer.server_main \
+    --host 0.0.0.0 --port 50052 \
+    --num_envs 16 --block_mode BLOCK_4 \
+    --max_inner_steps 100 --num_attempts 3
+```
+
+Then point LaMer at these servers (see the LaMer README for the training command).
+
+### Module overview
+
+| File | Purpose |
+|------|---------|
+| `lamer/envs.py` | `LanguageTableWorker` (Ray actor) and `LanguageTableMultiProcessEnv` (vectorised wrapper) |
+| `lamer/state_to_text.py` | Converts observation dicts to natural-language text for the LLM |
+| `lamer/env_manager.py` | `LanguageTableEnvironmentManager` with VLA inner loop (random actions by default) |
+| `lamer/protocol.py` | TCP wire protocol (length-prefixed pickle, pure stdlib) |
+| `lamer/server.py` | `EnvServer` that wraps the environment manager |
+| `lamer/server_main.py` | CLI entrypoint for the server |
+| `lamer/test_standalone.py` | Test/demo script with rendering and video output |
+| `lamer/test_connection.py` | Connection test for verifying server reachability (TCP + protocol) |
+
+### Connection testing
+
+Use `test_connection.py` to verify that the env servers are reachable and
+responding correctly. This is especially useful on SLURM where networking
+between nodes can be tricky.
+
+```bash
+# Basic connectivity (TCP + get_properties only)
+ltvenv/bin/python -m language_table.lamer.test_connection \
+    --host localhost --port 50051
+
+# Full protocol test (reset, step, restart, reflect cycle)
+ltvenv/bin/python -m language_table.lamer.test_connection \
+    --host localhost --port 50051 --full
+
+# Test both train + val servers
+ltvenv/bin/python -m language_table.lamer.test_connection \
+    --host localhost --port 50051 --val_port 50052 --full
+
+# With latency benchmark
+ltvenv/bin/python -m language_table.lamer.test_connection \
+    --host localhost --port 50051 --full --latency
+```
+
+On SLURM, if the server runs on a different node, replace `localhost` with the
+compute node hostname. Common troubleshooting:
+- Check the port is listening: `ssh <node> 'ss -tlnp | grep 50051'`
+- Test raw TCP: `nc -zv <node> 50051`
+- Ensure no firewall blocks inter-node traffic on the chosen ports
+
+### Meta-RL restart
+
+`restart()` restores the **exact** simulation state from the last `reset()` using
+PyBullet's `saveState`/`restoreState` plus cached Python-level task state
+(instruction, block assignments, reward calculator RNG). This guarantees
+bit-for-bit identical starting conditions across meta-RL attempts — all block
+positions, robot joints, task instructions, and rendered images match exactly.
 
 ## Interactive Language: Talking to Robots in Real Time
 [Project Website](https://interactive-language.github.io/)&nbsp;&nbsp;•&nbsp;&nbsp;[PDF](https://arxiv.org/pdf/2210.06407.pdf)

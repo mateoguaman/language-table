@@ -154,6 +154,7 @@ class LanguageTable(gym.Env):
     # Recompute state to include text instruction.
     state = self._compute_state()
     self._previous_state = state
+    self._last_state = state  # cache for external access (e.g. LaMer worker)
 
     # Add goal region sphere.
     if self._reward_calculator is not None and self._debug_visuals:
@@ -180,6 +181,7 @@ class LanguageTable(gym.Env):
     self._step_robot_and_sim(action)
 
     state = self._compute_state()
+    self._last_state = state  # cache for external access (e.g. LaMer worker)
 
     if self._reward_calculator is None:
       reward = 0.0
