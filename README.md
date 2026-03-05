@@ -15,7 +15,7 @@ uv venv --python 3.10 ./ltvenv
 source ./ltvenv/bin/activate
 uv pip install -r ./requirements.txt
 uv pip install --no-deps git+https://github.com/google-research/scenic.git@ae21d9e884015aa7bc7cf1d489af53d16c249726
-export PYTHONPATH=${PWD}:$PYTHONPATH
+export PYTHONPATH=${PWD}:$PYTHONPATH  # or run echo "export PYTHONPATH=$(pwd):\$PYTHONPATH" >> ~/.bashrc
 ```
 
 For running the full train script, install using `requirements_static.txt`, as

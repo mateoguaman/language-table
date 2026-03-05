@@ -163,13 +163,13 @@ def test_latency(sock, num_processes, n_trials=10):
               f"mean={np.mean(times):.1f}ms")
 
 
-def run_tests(host, port, full=False, latency=False):
+def run_tests(host, port, full=False, latency=False, timeout=10):
     """Run the test suite against a single server."""
     print(f"\n{'='*60}")
     print(f"Testing server at {host}:{port}")
     print(f"{'='*60}")
 
-    sock = test_tcp_connect(host, port)
+    sock = test_tcp_connect(host, port, timeout=timeout)
     if sock is None:
         return False
 
@@ -225,10 +225,10 @@ def main():
         args.full = True
 
     all_passed = True
-    all_passed &= run_tests(args.host, args.port, full=args.full, latency=args.latency)
+    all_passed &= run_tests(args.host, args.port, full=args.full, latency=args.latency, timeout=args.timeout)
 
     if args.val_port is not None:
-        all_passed &= run_tests(args.host, args.val_port, full=args.full, latency=args.latency)
+        all_passed &= run_tests(args.host, args.val_port, full=args.full, latency=args.latency, timeout=args.timeout)
 
     print(f"\n{'='*60}")
     if all_passed:
