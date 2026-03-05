@@ -194,10 +194,9 @@ def run_tests(host, port, full=False, latency=False, timeout=10):
         traceback.print_exc()
         return False
     finally:
-        try:
-            _call(sock, "close")
-        except Exception:
-            pass
+        # Only close the TCP socket — do NOT send "close" to the server,
+        # as that kills all Ray actors and makes the server unusable for
+        # subsequent connections (e.g., the training run).
         sock.close()
 
 
