@@ -43,6 +43,8 @@ class LanguageTableEnvironmentManager:
         do_reflection=False,
         max_inner_steps=100,
         reflection_type="reflection_only",
+        vla_policy=None,
+        include_rgb=False,
     ):
         self.envs = envs
         self.num_processes = envs.num_processes
@@ -51,6 +53,8 @@ class LanguageTableEnvironmentManager:
         self.do_reflection = do_reflection
         self.reflection_type = reflection_type
         self.max_inner_steps = max_inner_steps
+        self.vla = vla_policy
+        self._include_rgb = include_rgb
 
         # Action space bounds (Language Table uses [-0.1, 0.1]^2)
         self._action_low = -0.1
@@ -65,14 +69,21 @@ class LanguageTableEnvironmentManager:
         self._init_text_obs: List[str] = [""] * self.num_processes
         self._last_text_obs: List[str] = [""] * self.num_processes
         self._last_infos: List[Dict] = [{} for _ in range(self.num_processes)]
+        # Raw obs dicts cached for VLA (needs RGB at the start of each inner loop)
+        self._last_obs_list: List[Dict] = [{} for _ in range(self.num_processes)]
 
     # ------------------------------------------------------------------
     # Core interface
     # ------------------------------------------------------------------
 
     def _extract_images(self, obs_list):
-        """Extract RGB images from obs dicts if present."""
-        if obs_list and "rgb" in obs_list[0]:
+        """Extract RGB images from obs dicts for the client response.
+
+        Only includes images if include_rgb=True (i.e. the outer LLM client
+        needs images). The VLA accesses RGB directly from the obs dicts
+        without going through this method.
+        """
+        if self._include_rgb and obs_list and "rgb" in obs_list[0]:
             return [obs["rgb"] for obs in obs_list]
         return None
 
@@ -84,6 +95,10 @@ class LanguageTableEnvironmentManager:
         self.curr_turn_idx = 0
         self.reflections = [{} for _ in range(self.num_processes)]
 
+        if self.vla is not None:
+            self.vla.reset(num_envs=self.num_processes)
+
+        self._last_obs_list = obs_list
         text_obs = batch_state_to_text(obs_list)
         self._init_text_obs = text_obs
         self._last_text_obs = text_obs
@@ -116,6 +131,10 @@ class LanguageTableEnvironmentManager:
         self.curr_traj_idx += 1 if self.do_reflection else 0
         self.curr_turn_idx = 0
 
+        if self.vla is not None:
+            self.vla.reset(num_envs=self.num_processes)
+
+        self._last_obs_list = obs_list
         text_obs = batch_state_to_text(obs_list)
         self._last_text_obs = text_obs
         self._last_infos = infos
@@ -184,7 +203,9 @@ class LanguageTableEnvironmentManager:
     def _handle_play_step(self, goal_strings: List[str]):
         """Run the VLA inner loop for a full episode.
 
-        Currently uses random actions. Replace with real VLA inference later.
+        When a VLA policy is provided, it receives the LLM's goal strings as
+        language conditioning and produces actions from RGB observations.
+        Otherwise, falls back to random actions.
         """
         batch = self.num_processes
         active_mask = np.ones(batch, dtype=bool)
@@ -193,19 +214,39 @@ class LanguageTableEnvironmentManager:
         last_obs = None
         last_infos = [{} for _ in range(batch)]
 
-        for inner_step in range(self.max_inner_steps):
-            # Generate random actions for all envs (placeholder for VLA)
-            actions = [
-                np.random.uniform(self._action_low, self._action_high, size=(2,)).astype(np.float32)
-                for _ in range(batch)
-            ]
+        # Seed the VLA with the obs cached from reset()/restart().
+        # After the first env.step(), we use its returned obs instead — just
+        # like the original eval loop: obs = env.reset(); while: action =
+        # policy(obs); obs = env.step(action).
+        obs_list_for_vla = self._last_obs_list if self.vla is not None else None
 
-            # Zero out actions for inactive envs
-            for i in range(batch):
-                if not active_mask[i]:
-                    actions[i] = np.zeros(2, dtype=np.float32)
+        for inner_step in range(self.max_inner_steps):
+            if self.vla is not None:
+                # Batched VLA inference: the LLM's goal strings condition the
+                # policy, and RGB images from each env are preprocessed and
+                # fed through the LAVA model in a single forward pass.
+                actions = self.vla.predict(goal_strings, obs_list_for_vla, active_mask)
+            else:
+                # Random actions fallback (no VLA loaded)
+                if inner_step == 0:
+                    logger.warning(
+                        "No VLA policy loaded — using random actions for the "
+                        "inner loop. Set --vla_checkpoint to use the LAVA policy."
+                    )
+                actions = [
+                    np.random.uniform(self._action_low, self._action_high, size=(2,)).astype(np.float32)
+                    for _ in range(batch)
+                ]
+                for i in range(batch):
+                    if not active_mask[i]:
+                        actions[i] = np.zeros(2, dtype=np.float32)
 
             obs_list, rewards, dones, infos = self.envs.step(actions)
+
+            # Feed fresh observations back to the VLA for the next iteration,
+            # matching the original eval loop: action = policy(obs); obs = env.step(action)
+            if self.vla is not None:
+                obs_list_for_vla = obs_list
 
             rewards = np.array(rewards, dtype=np.float32)
             dones = np.array(dones, dtype=bool)

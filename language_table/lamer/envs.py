@@ -22,28 +22,23 @@ class LanguageTableWorker:
     ----------
     render_obs : bool
         If True (default), _compute_state() renders RGB via getCameraImage()
-        on every step/reset. Required when the inner-loop policy is a VLA
-        that consumes images. Set to False to skip rendering entirely for
-        maximum throughput (e.g. random-action baselines or text-only policies).
-    include_rgb : bool
-        If True, the RGB array is included in the observation dict returned
-        by step/reset/restart (and thus sent over the wire). Default False —
-        even when render_obs=True, we strip RGB before returning to avoid
-        pickling large arrays over TCP.
+        on every step/reset, and the RGB is included in the returned obs dict.
+        Required when the inner-loop policy is a VLA that consumes images.
+        Set to False to skip rendering entirely for maximum throughput
+        (e.g. random-action baselines or text-only policies).
     return_full_state : bool
         If True (default), returns the full state dict (with block positions).
         If False, returns the filtered observation dict (4 keys).
     """
 
     def __init__(self, block_mode, reward_factory_cls=None, seed=None,
-                 return_full_state=True, render_obs=True, include_rgb=False,
+                 return_full_state=True, render_obs=True,
                  **env_kwargs):
         if isinstance(block_mode, str):
             block_mode = LanguageTableBlockVariants(block_mode)
         self.seed_val = seed
         self._return_full_state = return_full_state
         self._render_obs = render_obs
-        self._include_rgb = include_rgb
         self.env = LanguageTable(
             block_mode=block_mode,
             reward_factory=reward_factory_cls,
@@ -71,7 +66,7 @@ class LanguageTableWorker:
             result = dict(state)
         else:
             result = dict(obs_or_state)
-        if not self._include_rgb:
+        if not self._render_obs:
             result.pop("rgb", None)
         return result
 
@@ -159,7 +154,7 @@ class LanguageTableWorker:
             obs = dict(state)
         else:
             obs = self.env._compute_observation(state=state)
-        if not self._include_rgb:
+        if not self._render_obs:
             obs.pop("rgb", None)
         return obs, {}
 
@@ -224,7 +219,6 @@ class LanguageTableMultiProcessEnv:
         timeout=None,
         return_full_state=True,
         render_obs=True,
-        include_rgb=False,
         **env_kwargs,
     ):
         if not ray.is_initialized():
@@ -247,7 +241,6 @@ class LanguageTableMultiProcessEnv:
                 block_mode, reward_factory_cls, seed=seed + i,
                 return_full_state=return_full_state,
                 render_obs=render_obs,
-                include_rgb=include_rgb,
                 **env_kwargs,
             )
             for i in range(self.num_processes)

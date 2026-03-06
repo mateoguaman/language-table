@@ -1,8 +1,8 @@
 clu
 dm-reverb==0.11.0
 gym<=0.23.0
-jax==0.4.17
-jaxlib==0.4.17
+jax[cuda12]==0.4.30
+jaxlib==0.4.30
 matplotlib
 numpy
 opencv-python
@@ -17,7 +17,9 @@ tensorflow_datasets==4.7.0
 tensorflow_io_gcs_filesystem==0.32.0
 tensorflow_text==2.12.1
 tf_agents==0.14.0
-flax==0.6.10
+flax==0.8.5
 git+https://github.com/openai/CLIP.git
 # LaMer integration (language_table/lamer/)
 ray[default]
+# setuptools with pkg_resources (needed by tensorflow_hub, removed in setuptools>=70)
+setuptools<70

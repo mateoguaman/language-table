@@ -10,6 +10,23 @@ import argparse
 import logging
 
 from language_table.environments.rewards.block2block import BlockToBlockReward
+from language_table.environments.rewards.block2absolutelocation import BlockToAbsoluteLocationReward
+from language_table.environments.rewards.block2relativelocation import BlockToRelativeLocationReward
+from language_table.environments.rewards.block2block_relative_location import BlockToBlockRelativeLocationReward
+from language_table.environments.rewards.point2block import PointToBlockReward
+from language_table.environments.rewards.separate_blocks import SeparateBlocksReward
+from language_table.environments.rewards.composite import CompositeReward
+
+REWARD_TYPES = {
+    "composite": CompositeReward,
+    "block2block": BlockToBlockReward,
+    "block2absolutelocation": BlockToAbsoluteLocationReward,
+    "block2relativelocation": BlockToRelativeLocationReward,
+    "block2block_relative_location": BlockToBlockRelativeLocationReward,
+    "point2block": PointToBlockReward,
+    "separate_blocks": SeparateBlocksReward,
+    "none": None,
+}
 
 logger = logging.getLogger(__name__)
 
@@ -26,16 +43,29 @@ def main():
     parser.add_argument("--max_inner_steps", type=int, default=100)
     parser.add_argument("--do_reflection", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--reward_type", type=str, default="block2block",
+                        choices=list(REWARD_TYPES.keys()),
+                        help="Reward type: 'composite' (all tasks), "
+                             "or a specific task family, or 'none'")
     parser.add_argument("--no_reward", action="store_true",
-                        help="Run without reward (episodes never terminate via reward)")
+                        help="(Deprecated, use --reward_type=none) "
+                             "Run without reward")
     parser.add_argument("--no_full_state", action="store_true",
                         help="Return filtered obs instead of full state (omits block positions)")
     parser.add_argument("--no_render", action="store_true",
                         help="Skip RGB rendering in _compute_state() for max throughput. "
                              "Only use when the inner-loop policy doesn't need images.")
     parser.add_argument("--include_rgb", action="store_true",
-                        help="Include RGB images in observations sent over the wire. "
-                             "Implies rendering is enabled (overrides --no_render).")
+                        help="Include RGB images in responses sent over TCP to "
+                             "the LLM client. Only needed if the outer-loop LLM "
+                             "requires images. The inner-loop VLA gets images "
+                             "directly from the Ray workers via render_obs.")
+    parser.add_argument("--vla_checkpoint", type=str, default=None,
+                        help="Full path to LAVA Flax checkpoint file (e.g. "
+                             "/path/to/checkpoints/bc_resnet_sim_checkpoint_955000). "
+                             "When set, the pre-trained LAVA policy handles inner-loop "
+                             "actions instead of random actions. Implies rendering "
+                             "is enabled (the VLA needs images).")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -47,10 +77,13 @@ def main():
     from .env_manager import LanguageTableEnvironmentManager
     from .server import EnvServer
 
-    reward_factory_cls = None if args.no_reward else BlockToBlockReward
+    if args.no_reward:
+        reward_factory_cls = None
+    else:
+        reward_factory_cls = REWARD_TYPES[args.reward_type]
 
-    # include_rgb implies rendering must be on
-    render_obs = not args.no_render or args.include_rgb
+    # VLA needs RGB from Ray workers, so force rendering on
+    render_obs = not args.no_render or args.vla_checkpoint is not None
 
     envs = LanguageTableMultiProcessEnv(
         num_envs=args.num_envs,
@@ -60,7 +93,6 @@ def main():
         group_n=args.group_n,
         return_full_state=not args.no_full_state,
         render_obs=render_obs,
-        include_rgb=args.include_rgb,
     )
 
     # Warm up: do a test reset to ensure all Ray workers are alive and
@@ -69,12 +101,30 @@ def main():
     envs.reset()
     logger.info("All workers ready.")
 
+    # Load VLA policy if checkpoint provided
+    vla_policy = None
+    if args.vla_checkpoint:
+        import os
+        from .lava_policy import LAVAPolicy
+
+        checkpoint_dir = os.path.dirname(args.vla_checkpoint)
+        checkpoint_prefix = os.path.basename(args.vla_checkpoint).rsplit("_", 1)[0] + "_"
+        logger.info("Loading LAVA policy from %s (prefix=%s)",
+                     checkpoint_dir, checkpoint_prefix)
+        vla_policy = LAVAPolicy(
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_prefix=checkpoint_prefix,
+        )
+        logger.info("LAVA policy loaded successfully.")
+
     manager = LanguageTableEnvironmentManager(
         envs=envs,
         num_attempts=args.num_attempts,
         max_turns=args.max_turns,
         do_reflection=args.do_reflection,
         max_inner_steps=args.max_inner_steps,
+        vla_policy=vla_policy,
+        include_rgb=args.include_rgb,
     )
 
     server = EnvServer(manager, host=args.host, port=args.port)
