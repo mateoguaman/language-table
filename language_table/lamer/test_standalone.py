@@ -3,7 +3,7 @@ Standalone test/demo script for the Language Table LaMer integration.
 
 Usage:
     ltvenv/bin/python -m language_table.lamer.test_standalone \
-        --num_envs 4 --num_steps 50 --output_dir /tmp/lt_renders
+        --num_envs 4 --num_steps 50 --output_dir "${LT_RENDER_DIR:-/tmp/lt_renders}"
 
 Tests:
     1. Single env smoke test: 1 env, 10 random steps, save render
@@ -334,7 +334,11 @@ def main():
     parser = argparse.ArgumentParser(description="Language Table LaMer test suite")
     parser.add_argument("--num_envs", type=int, default=4)
     parser.add_argument("--num_steps", type=int, default=50)
-    parser.add_argument("--output_dir", type=str, default="/tmp/lt_renders")
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=os.environ.get("LT_RENDER_DIR", "/tmp/lt_renders"),
+    )
     parser.add_argument("--scaling_sweep", action="store_true")
     parser.add_argument("--num_cpus", type=float, nargs="+",
                         default=[0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0],

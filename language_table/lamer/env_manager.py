@@ -71,6 +71,36 @@ class LanguageTableEnvironmentManager:
         self._last_infos: List[Dict] = [{} for _ in range(self.num_processes)]
         # Raw obs dicts cached for VLA (needs RGB at the start of each inner loop)
         self._last_obs_list: List[Dict] = [{} for _ in range(self.num_processes)]
+        self._last_goal_strings: List[str] = [""] * self.num_processes
+
+    def _log_step_failure(
+        self,
+        inner_step: int,
+        goal_strings: List[str],
+        actions: List[np.ndarray],
+        active_mask: np.ndarray,
+    ) -> None:
+        """Emit the last step context before re-raising an env failure."""
+        active_indices = np.flatnonzero(active_mask).tolist()
+        sample_context = []
+        for env_idx in active_indices[:5]:
+            action = np.asarray(actions[env_idx], dtype=np.float32)
+            sample_context.append({
+                "env_idx": env_idx,
+                "goal": goal_strings[env_idx][:160],
+                "action": action.tolist(),
+                "action_norm": float(np.linalg.norm(action)),
+            })
+
+        logger.exception(
+            "Language Table play step failed: inner_step=%d active=%d/%d "
+            "active_indices_sample=%s context_sample=%s",
+            inner_step,
+            int(active_mask.sum()),
+            len(active_mask),
+            active_indices[:10],
+            sample_context,
+        )
 
     # ------------------------------------------------------------------
     # Core interface
@@ -213,6 +243,7 @@ class LanguageTableEnvironmentManager:
         final_dones = np.zeros(batch, dtype=bool)
         last_obs = None
         last_infos = [{} for _ in range(batch)]
+        self._last_goal_strings = list(goal_strings)
 
         # Seed the VLA with the obs cached from reset()/restart().
         # After the first env.step(), we use its returned obs instead — just
@@ -241,7 +272,33 @@ class LanguageTableEnvironmentManager:
                     if not active_mask[i]:
                         actions[i] = np.zeros(2, dtype=np.float32)
 
-            obs_list, rewards, dones, infos = self.envs.step(actions)
+            action_array = np.asarray(actions, dtype=np.float32)
+            invalid_action_mask = ~np.isfinite(action_array).all(axis=1)
+            if invalid_action_mask.any():
+                bad_indices = np.flatnonzero(invalid_action_mask).tolist()
+                logger.error(
+                    "Invalid action batch at inner_step=%d bad_envs=%s goals=%s actions=%s",
+                    inner_step,
+                    bad_indices,
+                    [goal_strings[i][:160] for i in bad_indices[:5]],
+                    [action_array[i].tolist() for i in bad_indices[:5]],
+                )
+
+            cached_obs = (
+                obs_list_for_vla
+                if obs_list_for_vla is not None
+                else self._last_obs_list
+            )
+            try:
+                obs_list, rewards, dones, infos = self.envs.step(
+                    actions,
+                    active_mask=active_mask,
+                    cached_obs=cached_obs,
+                    cached_infos=last_infos,
+                )
+            except Exception:
+                self._log_step_failure(inner_step, goal_strings, actions, active_mask)
+                raise
 
             # Feed fresh observations back to the VLA for the next iteration,
             # matching the original eval loop: action = policy(obs); obs = env.step(action)
@@ -256,6 +313,13 @@ class LanguageTableEnvironmentManager:
             newly_done = dones & active_mask
             final_dones |= newly_done
             active_mask &= ~dones
+            if newly_done.any():
+                logger.info(
+                    "Language Table inner step %d completed envs=%s remaining_active=%d",
+                    inner_step,
+                    np.flatnonzero(newly_done).tolist(),
+                    int(active_mask.sum()),
+                )
 
             last_obs = obs_list
             for i in range(batch):

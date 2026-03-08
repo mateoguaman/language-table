@@ -14,6 +14,8 @@
 # limitations under the License.
 
 """XArm Robot Kinematics."""
+import logging
+
 from language_table.environments.utils import utils_pybullet
 from language_table.environments.utils.pose3d import Pose3d
 import numpy as np
@@ -35,6 +37,8 @@ CYLINDER_REAL_URDF_PATH = (
     'third_party/py/language_table/environments/assets/suction/'
     'cylinder_real.urdf')
 HOME_JOINT_POSITIONS = np.deg2rad([0, -20, -80, 0, 100, -30])
+
+logger = logging.getLogger(__name__)
 
 
 class XArmSimRobot():
@@ -148,8 +152,21 @@ class XArmSimRobot():
     """Forward kinematics."""
     effector_state = self._pybullet_client.getLinkState(
         self.xarm, self.effector_link, computeForwardKinematics=1)
+    quat = np.asarray(effector_state[1], dtype=np.float64)
+    quat_norm = np.linalg.norm(quat)
+    if quat_norm <= 1e-12:
+      joint_positions = self.get_joint_positions()
+      message = (
+          'Invalid end-effector quaternion from PyBullet: '
+          f'quat={quat.tolist()} norm={quat_norm:.3e} '
+          f'translation={np.asarray(effector_state[0]).tolist()} '
+          f'joint_positions={joint_positions.tolist()} '
+          f'xarm={self.xarm} effector_link={self.effector_link}'
+      )
+      logger.error(message)
+      raise ValueError(message)
     return Pose3d(translation=np.array(effector_state[0]),
-                  rotation=transform.Rotation.from_quat(effector_state[1]))
+                  rotation=transform.Rotation.from_quat(quat))
 
   def inverse_kinematics(self,
                          world_effector_pose,

@@ -6,12 +6,15 @@ each Ray actor holds an independent LanguageTable gym.Env instance.
 """
 
 import copy
+import logging
 
 import ray
 import numpy as np
 
 from language_table.environments.language_table import LanguageTable
 from language_table.environments.blocks import LanguageTableBlockVariants
+
+logger = logging.getLogger(__name__)
 
 
 @ray.remote(num_cpus=0.01)
@@ -75,6 +78,18 @@ class LanguageTableWorker:
             self._skip_render()
         try:
             obs, reward, done, info = self.env.step(action)
+        except Exception:
+            logger.exception(
+                "LanguageTableWorker.step failed: seed=%s instruction=%r action=%s "
+                "target_pose=%s last_effector=%s",
+                self.seed_val,
+                getattr(self.env, "_instruction_str", None),
+                np.asarray(action).tolist(),
+                getattr(getattr(self.env, "_target_effector_pose", None), "translation", None),
+                None if getattr(self.env, "_last_state", None) is None else
+                np.asarray(self.env._last_state.get("effector_translation", [])).tolist(),
+            )
+            raise
         finally:
             if not self._render_obs:
                 self._restore_render()
@@ -246,17 +261,66 @@ class LanguageTableMultiProcessEnv:
             for i in range(self.num_processes)
         ]
 
-    def step(self, actions):
-        """Step all envs in parallel. actions: list of (2,) arrays."""
+    def step(self, actions, active_mask=None, cached_obs=None, cached_infos=None):
+        """Step active envs in parallel.
+
+        Parameters
+        ----------
+        actions : list[np.ndarray]
+            One action per environment.
+        active_mask : np.ndarray | None
+            Optional bool mask of envs to step. Inactive envs are returned
+            from cache without sending another step to their workers.
+        cached_obs : list[dict] | None
+            Previous observations to reuse for inactive envs.
+        cached_infos : list[dict] | None
+            Previous infos to reuse for inactive envs.
+        """
         assert len(actions) == self.num_processes
-        futures = [w.step.remote(a) for w, a in zip(self.workers, actions)]
+
+        if active_mask is None:
+            futures = [w.step.remote(a) for w, a in zip(self.workers, actions)]
+            results = ray.get(futures, timeout=self.timeout)
+            obs_list, reward_list, done_list, info_list = [], [], [], []
+            for obs, reward, done, info in results:
+                obs_list.append(obs)
+                reward_list.append(reward)
+                done_list.append(done)
+                info_list.append(info)
+            return obs_list, reward_list, done_list, info_list
+
+        active_mask = np.asarray(active_mask, dtype=bool)
+        if active_mask.shape != (self.num_processes,):
+            raise ValueError(
+                f"active_mask shape must be ({self.num_processes},), got {active_mask.shape}"
+            )
+
+        obs_list = list(cached_obs) if cached_obs is not None else [{} for _ in range(self.num_processes)]
+        reward_list = [0.0 for _ in range(self.num_processes)]
+        done_list = [bool(not is_active) for is_active in active_mask]
+        info_list = (
+            [dict(info) for info in cached_infos]
+            if cached_infos is not None
+            else [{} for _ in range(self.num_processes)]
+        )
+
+        active_indices = np.flatnonzero(active_mask).tolist()
+        if not active_indices:
+            for idx in range(self.num_processes):
+                info_list[idx]["skipped_step_after_done"] = True
+            return obs_list, reward_list, done_list, info_list
+
+        futures = [self.workers[idx].step.remote(actions[idx]) for idx in active_indices]
         results = ray.get(futures, timeout=self.timeout)
-        obs_list, reward_list, done_list, info_list = [], [], [], []
-        for obs, reward, done, info in results:
-            obs_list.append(obs)
-            reward_list.append(reward)
-            done_list.append(done)
-            info_list.append(info)
+        for idx, (obs, reward, done, info) in zip(active_indices, results):
+            obs_list[idx] = obs
+            reward_list[idx] = reward
+            done_list[idx] = done
+            info_list[idx] = info
+
+        for idx in range(self.num_processes):
+            if not active_mask[idx]:
+                info_list[idx]["skipped_step_after_done"] = True
         return obs_list, reward_list, done_list, info_list
 
     def reset(self):

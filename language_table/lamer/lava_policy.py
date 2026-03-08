@@ -297,11 +297,33 @@ class LAVAPolicy:
         if n_active == 0:
             return [np.zeros(2, dtype=np.float32) for _ in range(batch_size)]
 
+        empty_goal_indices = [
+            idx for idx, goal in enumerate(goals)
+            if active_mask[idx] and not goal.strip()
+        ]
+        if empty_goal_indices:
+            logger.warning(
+                "Empty goal strings passed to LAVA for envs=%s",
+                empty_goal_indices[:10],
+            )
+
         # Build batched input (also updates frame buffers)
         observation = self._build_batch(goals, obs_list, active_mask)
 
         # Run JIT-compiled forward pass (denormalization + clip included)
         actions = np.array(self._forward_jit(self.variables, observation))
+        invalid_action_mask = ~np.isfinite(actions).all(axis=1)
+        if invalid_action_mask.any():
+            bad_indices = np.flatnonzero(invalid_action_mask).tolist()
+            logger.error(
+                "LAVA produced invalid actions for envs=%s goals=%s actions=%s",
+                bad_indices[:10],
+                [goals[i][:160] for i in bad_indices[:5]],
+                [actions[i].tolist() for i in bad_indices[:5]],
+            )
+            raise ValueError(
+                f"LAVA produced non-finite actions for envs={bad_indices[:10]}"
+            )
 
         # Zero out inactive envs
         actions[~active_mask] = 0.0
