@@ -348,6 +348,14 @@ class LanguageTableEnvironmentManager:
         for info in last_infos:
             info["is_action_valid"] = np.array(1.0)
 
+        # Attach aggregated VLA health stats so they flow back to the
+        # trainer and can be logged to wandb.
+        if self.vla is not None:
+            vla_stats = self.vla.get_and_reset_step_stats()
+            if vla_stats:
+                for info in last_infos:
+                    info["vla_stats"] = vla_stats
+
         return observations, total_rewards, final_dones, last_infos
 
     def _handle_reflect_step(self, text_actions: List[str]):
