@@ -12,6 +12,7 @@ local imports adjusted.
 
 import logging
 import socket
+import time
 import traceback
 
 from .protocol import EnvRequest, EnvResponse, send_message, recv_message
@@ -28,6 +29,8 @@ _ALLOWED_METHODS = frozenset({
     "close",
     "build_text_obs",
 })
+
+_TIMED_METHODS = frozenset({"reset", "step", "restart", "reflect"})
 
 
 class EnvServer:
@@ -75,8 +78,13 @@ class EnvServer:
     def _handle_connection(self, conn: socket.socket):
         """Process requests from a single client until it disconnects or
         sends a ``close`` request."""
+        conn.settimeout(120)  # detect dead clients instead of blocking forever
         while True:
-            request: EnvRequest = recv_message(conn)
+            try:
+                request: EnvRequest = recv_message(conn)
+            except socket.timeout:
+                logger.warning("Client idle for 600s — dropping connection")
+                break
             response = self._dispatch(request)
             send_message(conn, response)
             if request.method == "close":
@@ -96,7 +104,11 @@ class EnvServer:
                 )
 
             method = getattr(self.env, request.method)
+            t0 = time.monotonic()
             result = method(*request.args, **request.kwargs)
+            elapsed = time.monotonic() - t0
+            if request.method in _TIMED_METHODS:
+                logger.info("%s completed in %.3fs", request.method, elapsed)
             return EnvResponse(
                 request_id=request.request_id,
                 status="ok",

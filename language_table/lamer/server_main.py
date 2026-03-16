@@ -66,6 +66,15 @@ def main():
                              "When set, the pre-trained LAVA policy handles inner-loop "
                              "actions instead of random actions. Implies rendering "
                              "is enabled (the VLA needs images).")
+    parser.add_argument("--policy", type=str, default="lava",
+                        choices=["lava", "gemini"],
+                        help="Inner-loop policy type. 'lava' uses the LAVA VLA "
+                             "(requires --vla_checkpoint). 'gemini' uses the "
+                             "Gemini API to translate action strings.")
+    parser.add_argument("--gemini_max_output_tokens", type=int, default=1024,
+                        help="Max output tokens per Gemini API request.")
+    parser.add_argument("--gemini_timeout", type=float, default=30.0,
+                        help="Per-request timeout in seconds for Gemini API calls.")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -74,7 +83,6 @@ def main():
     )
 
     from .envs import LanguageTableMultiProcessEnv
-    from .env_manager import LanguageTableEnvironmentManager
     from .server import EnvServer
 
     if args.no_reward:
@@ -101,31 +109,60 @@ def main():
     envs.reset()
     logger.info("All workers ready.")
 
-    # Load VLA policy if checkpoint provided
-    vla_policy = None
-    if args.vla_checkpoint:
-        import os
-        from .lava_policy import LAVAPolicy
+    if args.policy == "gemini":
+        from .gemini_policy import GeminiPolicy
+        from .gemini_env_manager import LanguageTableEnvironmentManager
 
-        checkpoint_dir = os.path.dirname(args.vla_checkpoint)
-        checkpoint_prefix = os.path.basename(args.vla_checkpoint).rsplit("_", 1)[0] + "_"
-        logger.info("Loading LAVA policy from %s (prefix=%s)",
-                     checkpoint_dir, checkpoint_prefix)
-        vla_policy = LAVAPolicy(
-            checkpoint_dir=checkpoint_dir,
-            checkpoint_prefix=checkpoint_prefix,
+        logger.info(
+            "Using Gemini policy (action string translation, "
+            "max_output_tokens=%d, timeout=%.1fs)",
+            args.gemini_max_output_tokens, args.gemini_timeout,
         )
-        logger.info("LAVA policy loaded successfully.")
+        policy = GeminiPolicy(
+            max_output_tokens=args.gemini_max_output_tokens,
+            timeout=args.gemini_timeout,
+        )
+        manager = LanguageTableEnvironmentManager(
+            envs=envs,
+            policy=policy,
+            num_attempts=args.num_attempts,
+            max_turns=args.max_turns,
+            do_reflection=args.do_reflection,
+            max_inner_steps=args.max_inner_steps,
+            include_rgb=args.include_rgb,
+        )
+    else:
+        # LAVA VLA policy (or random-action fallback if no checkpoint)
+        from .lava_env_manager import LanguageTableEnvironmentManager
 
-    manager = LanguageTableEnvironmentManager(
-        envs=envs,
-        num_attempts=args.num_attempts,
-        max_turns=args.max_turns,
-        do_reflection=args.do_reflection,
-        max_inner_steps=args.max_inner_steps,
-        vla_policy=vla_policy,
-        include_rgb=args.include_rgb,
-    )
+        vla_policy = None
+        if args.vla_checkpoint:
+            import os
+            from .lava_policy import LAVAPolicy
+
+            checkpoint_dir = os.path.dirname(args.vla_checkpoint)
+            checkpoint_prefix = (
+                os.path.basename(args.vla_checkpoint).rsplit("_", 1)[0] + "_"
+            )
+            logger.info(
+                "Loading LAVA policy from %s (prefix=%s)",
+                checkpoint_dir, checkpoint_prefix,
+            )
+            vla_policy = LAVAPolicy(
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_prefix=checkpoint_prefix,
+            )
+            logger.info("LAVA policy loaded successfully.")
+
+        manager = LanguageTableEnvironmentManager(
+            envs=envs,
+            num_attempts=args.num_attempts,
+            max_turns=args.max_turns,
+            do_reflection=args.do_reflection,
+            max_inner_steps=args.max_inner_steps,
+            vla_policy=vla_policy,
+            include_rgb=args.include_rgb,
+        )
 
     server = EnvServer(manager, host=args.host, port=args.port)
     server.serve()

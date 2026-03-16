@@ -21,5 +21,6 @@ flax==0.8.5
 git+https://github.com/openai/CLIP.git
 # LaMer integration (language_table/lamer/)
 ray[default]
+google-genai
 # setuptools with pkg_resources (needed by tensorflow_hub, removed in setuptools>=70)
 setuptools<70
