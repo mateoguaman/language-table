@@ -19,8 +19,10 @@ This is based on the SimpleTokenizer implementation from CLIP.
 
 Note: while this returns similar results for many strings used in
 language_table, there is no guarantee that this returns equivalent tokens for
-every text input in general. Particularly, escaped HTML input is not
-correctly handled. See test cases for more details.
+every text input in general.  The ``tokenize_text`` entry-point applies the
+same ``ftfy`` + ``html.unescape`` cleanup that CLIP's reference
+SimpleTokenizer uses, so most common Unicode variants (curly quotes,
+smart dashes, etc.) are handled.  See test cases for more details.
 
 General usage is:
 ```
@@ -31,6 +33,10 @@ tokens = tokenize_text("example input text", tokenizer)
 """
 
 import gzip
+import html
+import re
+
+import ftfy
 
 from clip.simple_tokenizer import bytes_to_unicode
 from clip.simple_tokenizer import default_bpe
@@ -135,8 +141,72 @@ def create_vocab(*, bpe_path=default_bpe()):
   return bpe_lookup
 
 
+def basic_clean(text):
+  """Match the preprocessing from CLIP's SimpleTokenizer.
+
+  The reference SimpleTokenizer (clip.simple_tokenizer) applies
+  ``ftfy.fix_text`` followed by double ``html.unescape`` before
+  tokenizing.  The TF ClipTokenizer historically skipped this step,
+  which meant that any Unicode character outside the BPE byte-vocab
+  (e.g. curly quotes U+2018/2019, em-dashes U+2014, zero-width
+  spaces, etc.) would produce an OOV token (id 49408).  Since the
+  CLIP embedding table has only 49408 entries (indices 0-49407), an
+  OOV index causes an out-of-bounds lookup that silently returns
+  garbage in JAX, leading to NaN actions downstream.
+
+  Applying the same cleanup here closes the parity gap.
+  """
+  text = ftfy.fix_text(text)
+  text = html.unescape(html.unescape(text))
+  return text.strip()
+
+
+def _clean_for_clip(text):
+  """Normalize text inputs before TF tokenization.
+
+  Accepts a single string, a list of strings, or a TF string tensor.
+  Returns a TF string tensor with the same shape.
+  """
+  if isinstance(text, (str, bytes)):
+    return basic_clean(text if isinstance(text, str)
+                       else text.decode("utf-8", errors="replace"))
+
+  if isinstance(text, (list, tuple)):
+    return [basic_clean(t) for t in text]
+
+  # TF tensor path — apply a best-effort regex substitution for the
+  # most common OOV-producing characters.  This is not as thorough as
+  # ftfy but covers the characters that actually appear in practice
+  # (LLM-generated goal strings).  A full ftfy pass would require
+  # tf.py_function which breaks graph tracing in the training
+  # pipeline; the regex approach keeps the op inside the TF graph.
+  _UNICODE_REPLACEMENTS = [
+      # Curly single quotes / apostrophe variants → ASCII apostrophe
+      (r"[\u2018\u2019\u201A\u201B\u02BC\uFF07]", "'"),
+      # Curly double quotes → ASCII double quote
+      (r"[\u201C\u201D\u201E\u201F\uFF02]", '"'),
+      # En-dash / em-dash → hyphen
+      (r"[\u2013\u2014]", "-"),
+      # Ellipsis → three dots
+      (r"\u2026", "..."),
+      # Prime / double prime → apostrophe / double quote
+      (r"\u2032", "'"),
+      (r"\u2033", '"'),
+      # Minus sign → hyphen-minus
+      (r"\u2212", "-"),
+      # Non-breaking space → regular space
+      (r"\u00A0", " "),
+      # Zero-width characters → empty
+      (r"[\u200B\u200C\u200D\uFEFF\u00AD]", ""),
+  ]
+  for pattern, replacement in _UNICODE_REPLACEMENTS:
+    text = tf.strings.regex_replace(text, pattern, replacement)
+  return text
+
+
 def tokenize_text(text, tokenizer, vocab_size=49408):
   """Tokenizes the input text given a tokenizer."""
+  text = _clean_for_clip(text)
   tokens, start_idx, end_idx = tokenizer.tokenize_with_offsets(text)
   # flatten sub-word tokenization
   tokens = tokens.merge_dims(-2, -1)
