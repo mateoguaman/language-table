@@ -310,20 +310,36 @@ class LAVAPolicy:
         # Build batched input (also updates frame buffers)
         observation = self._build_batch(goals, obs_list, active_mask)
 
+        rgb_obs = np.asarray(observation["rgb"])
+        clip_obs = np.asarray(observation["instruction_tokenized_clip"])
+        rgb_finite = bool(np.isfinite(rgb_obs).all())
+        if not rgb_finite:
+            nan_envs = np.flatnonzero(
+                ~np.isfinite(rgb_obs.reshape(len(goals), -1)).all(axis=1)
+            ).tolist()
+            logger.error("Non-finite RGB inputs for envs=%s", nan_envs[:10])
+
         # Run JIT-compiled forward pass (denormalization + clip included)
         actions = np.array(self._forward_jit(self.variables, observation))
         invalid_action_mask = ~np.isfinite(actions).all(axis=1)
         if invalid_action_mask.any():
             bad_indices = np.flatnonzero(invalid_action_mask).tolist()
-            logger.error(
-                "LAVA produced invalid actions for envs=%s goals=%s actions=%s",
-                bad_indices[:10],
-                [goals[i][:160] for i in bad_indices[:5]],
-                [actions[i].tolist() for i in bad_indices[:5]],
-            )
-            raise ValueError(
-                f"LAVA produced non-finite actions for envs={bad_indices[:10]}"
-            )
+
+            diag_lines = [
+                f"LAVA non-finite actions for envs={bad_indices[:10]}",
+                f"  rgb_all_finite={rgb_finite}  rgb_range=[{float(rgb_obs.min()):.3f}, {float(rgb_obs.max()):.3f}]",
+            ]
+            for idx in bad_indices[:5]:
+                tokens = clip_obs[idx, 0].tolist()
+                nonzero_tokens = [t for t in tokens if t != 0]
+                diag_lines.append(
+                    f"  env={idx}  goal={goals[idx][:160]!r}"
+                    f"  action={actions[idx].tolist()}"
+                    f"  clip_tokens({len(nonzero_tokens)} nonzero)={nonzero_tokens[:15]}"
+                )
+            diag_msg = "\n".join(diag_lines)
+            logger.error(diag_msg)
+            raise ValueError(diag_msg)
 
         # Zero out inactive envs
         actions[~active_mask] = 0.0

@@ -8,6 +8,7 @@ Follows the two-loop VLA architecture from pybullet_vla/env_manager.py:
 """
 
 import logging
+import re
 from collections import defaultdict
 from typing import Any, Dict, List
 
@@ -16,6 +17,20 @@ import numpy as np
 from .state_to_text import batch_state_to_text
 
 logger = logging.getLogger(__name__)
+
+def clean_string(s: str) -> str:
+
+    if s == "!":
+        # NOTE: environment has done=True so first qwen token is passed ("!")
+        return "inactive environment"
+
+    cleaned = re.sub(r"[^a-z ,]", "", s.lower()).strip()
+    
+    if not cleaned:
+        # NOTE: empty instruction after cleaning
+        return "empty instruction"
+    
+    return cleaned
 
 
 class LanguageTableEnvironmentManager:
@@ -45,6 +60,7 @@ class LanguageTableEnvironmentManager:
         reflection_type="reflection_only",
         vla_policy=None,
         include_rgb=False,
+        split="train",
     ):
         self.envs = envs
         self.num_processes = envs.num_processes
@@ -55,6 +71,7 @@ class LanguageTableEnvironmentManager:
         self.max_inner_steps = max_inner_steps
         self.vla = vla_policy
         self._include_rgb = include_rgb
+        self.split = split
 
         # Action space bounds (Language Table uses [-0.1, 0.1]^2)
         self._action_low = -0.1
@@ -237,6 +254,12 @@ class LanguageTableEnvironmentManager:
         language conditioning and produces actions from RGB observations.
         Otherwise, falls back to random actions.
         """
+        
+        raw_strings = list(goal_strings)
+        for i, raw in enumerate(raw_strings):   
+            cleaned = clean_string(raw)
+            goal_strings[i] = cleaned
+
         batch = self.num_processes
         active_mask = np.ones(batch, dtype=bool)
         total_rewards = np.zeros(batch, dtype=np.float32)
@@ -329,13 +352,19 @@ class LanguageTableEnvironmentManager:
             if not active_mask.any():
                 break
 
-        # Mark timed-out envs as done
-        final_dones |= active_mask
-        active_mask[:] = False
+        timed_out = active_mask.copy()
+        if timed_out.any():
+            logger.info(
+                "Language Table inner loop timed out after %d steps: "
+                "envs=%s (these did NOT win)",
+                self.max_inner_steps,
+                np.flatnonzero(timed_out).tolist(),
+            )
 
         final_obs = last_obs if last_obs is not None else [{}] * batch
         text_obs = batch_state_to_text(final_obs)
         self._last_text_obs = text_obs
+        self._last_obs_list = final_obs
         self._last_infos = last_infos
         self.curr_turn_idx += 1
 
@@ -345,8 +374,9 @@ class LanguageTableEnvironmentManager:
             "anchor": text_obs,
         }
 
-        for info in last_infos:
+        for i, info in enumerate(last_infos):
             info["is_action_valid"] = np.array(1.0)
+            info["won"] = bool(final_dones[i])
 
         return observations, total_rewards, final_dones, last_infos
 
