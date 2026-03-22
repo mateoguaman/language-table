@@ -56,16 +56,16 @@ class EnvServer:
 
         try:
             while True:
-                logger.info("Waiting for client connection …")
+                logger.debug("Waiting for client connection …")
                 conn, addr = srv.accept()
                 logger.info("Client connected from %s", addr)
                 try:
                     self._handle_connection(conn)
                 except ConnectionError as exc:
-                    logger.warning("Client disconnected: %s", exc)
+                    logger.debug("Client disconnected: %s", exc)
                 finally:
                     conn.close()
-                    logger.info("Connection from %s closed", addr)
+                    logger.debug("Connection from %s closed", addr)
         except KeyboardInterrupt:
             logger.info("Server interrupted — shutting down")
         finally:
@@ -78,7 +78,9 @@ class EnvServer:
     def _handle_connection(self, conn: socket.socket):
         """Process requests from a single client until it disconnects or
         sends a ``close`` request."""
-        conn.settimeout(120)  # detect dead clients instead of blocking forever
+        # detect dead clients instead of blocking forever
+        # keep this at 600 to ensure initial evaluation doesn't kill the server
+        conn.settimeout(600)
         while True:
             try:
                 request: EnvRequest = recv_message(conn)

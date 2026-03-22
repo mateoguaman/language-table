@@ -190,6 +190,8 @@ class LanguageTableEnvironmentManager:
         """Translate goal strings via Gemini, then execute open-loop."""
         batch = self.num_processes
 
+        logger.debug("Goal strings: %s", goal_strings)
+
         # 1. Translate each goal string into a variable-length action list
         # actions_per_env: List[List[np.ndarray]] = []
         # for i in range(batch):
@@ -212,12 +214,9 @@ class LanguageTableEnvironmentManager:
         results = asyncio.run(_translate_all())
         for i, result in enumerate(results):
             if self._disturbances[i] is None and result["disturbance"]:
-                print(f"[env {i}]", result["disturbance"])
+                logger.info("env %d: assigned perturbation %s", i, result["disturbance"])
                 self._disturbances[i] = result["disturbance"]
 
-        # for i, result in enumerate(results):
-        #     print(f"[env {i}]", result)
-        
         actions_per_env = [result["disturbed_actions"] for result in results]
         # use true_actions for debugging purposes
         # actions_per_env = [result["true_actions"] for result in results]

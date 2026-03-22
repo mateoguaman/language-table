@@ -71,15 +71,26 @@ def main():
                         help="Inner-loop policy type. 'lava' uses the LAVA VLA "
                              "(requires --vla_checkpoint). 'gemini' uses the "
                              "Gemini API to translate action strings.")
-    parser.add_argument("--gemini_max_output_tokens", type=int, default=1024,
-                        help="Max output tokens per Gemini API request.")
     parser.add_argument("--gemini_timeout", type=float, default=30.0,
                         help="Per-request timeout in seconds for Gemini API calls.")
+    parser.add_argument("--split", type=str, default="train",
+                        choices=["train", "val"],
+                        help="Perturbation split: 'train' uses the 80%% subset, "
+                             "'val' uses the held-out 20%% subset.")
     args = parser.parse_args()
 
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        format="%(asctime)s %(levelname)-5s [%(name)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    logger.info(
+        "Server config: host=%s port=%d envs=%d group_n=%d blocks=%s "
+        "policy=%s split=%s max_steps=%d attempts=%d turns=%d",
+        args.host, args.port, args.num_envs, args.group_n,
+        args.block_mode, args.policy, args.split,
+        args.max_inner_steps, args.num_attempts, args.max_turns,
     )
 
     from .envs import LanguageTableMultiProcessEnv
@@ -115,12 +126,12 @@ def main():
 
         logger.info(
             "Using Gemini policy (action string translation, "
-            "max_output_tokens=%d, timeout=%.1fs)",
-            args.gemini_max_output_tokens, args.gemini_timeout,
+            "timeout=%.1fs)",
+            args.gemini_timeout,
         )
         policy = GeminiPolicy(
-            max_output_tokens=args.gemini_max_output_tokens,
             timeout=args.gemini_timeout,
+            split=args.split,
         )
         manager = LanguageTableEnvironmentManager(
             envs=envs,
@@ -162,6 +173,7 @@ def main():
             max_inner_steps=args.max_inner_steps,
             vla_policy=vla_policy,
             include_rgb=args.include_rgb,
+            split=args.split,
         )
 
     server = EnvServer(manager, host=args.host, port=args.port)

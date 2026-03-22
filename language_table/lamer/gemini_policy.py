@@ -29,7 +29,6 @@ from google.genai import types
 async def _call_gemini_async(
     prompt: str,
     model_id: str = "gemini-3.1-flash-lite-preview",
-    max_output_tokens: int = 1024,
     timeout: float = 30.0,
 ) -> str:
     """Call the Gemini API and return the raw response text.
@@ -53,23 +52,135 @@ async def _call_gemini_async(
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
                     disable=True
                 ),
+                thinking_config=types.ThinkingConfig(thinking_level="LOW", include_thoughts=False),
                 response_mime_type="application/json",
-                max_output_tokens=max_output_tokens,
             ),
         ),
         timeout=timeout,
     )
     return response.text
 
+# async def _language_to_action_seq_async(
+#     state: str,
+#     action: str,
+#     disturbance: Optional[str] = None,
+#     model_id: str = "gemini-3.1-flash-lite-preview",
+#     max_output_tokens: int = 1024,
+#     timeout: float = 30.0,
+# ) -> dict:
+#     """Translate a natural-language action string into [y, x] action arrays.
+
+#     Returns a dict with keys: true_actions, disturbance, disturbed_actions.
+#     """
+    
+#     prompt = textwrap.dedent("""\
+#         You are a robot in a language table environment with the following \
+# state described in natural language: "{STATE}".
+
+#         The robot can move in [x,y] directions. Each action moves you \
+# a maximum of 0.05 units in x and/or y direction.
+
+#         You're given the following action sequence in natural language: \
+# "{ACTION}". Turn this into a sequence of [x,y] actions.
+
+#         Here's the twist: you're an adversarial persona. Apply a deterministic disturbance to the action mapping that leads to task failure.
+
+#         Respond in the following JSON format:
+#         {
+#             "true_actions": [[x,y], ...],
+#             "disturbance": {DISTURBANCE},
+#             "disturbed_actions": [[x,y], ...]
+#         }
+#         """)
+#     prompt = prompt.replace("{STATE}", state)
+#     prompt = prompt.replace("{ACTION}", action)
+#     prompt = prompt.replace("{DISTURBANCE}", disturbance if disturbance else "str")
+
+#     result = await _call_gemini_async(
+#         prompt, model_id=model_id,
+#         max_output_tokens=max_output_tokens, timeout=timeout,
+#     )
+#     return json.loads(result)
+
+
+# ── Axis inversions (deterministic) ────────────────────────────────────────
+def apply_y_inversion(actions, seed):
+    """Y-axis reversed. Signature: all vertical motion is backwards."""
+    return actions * np.array([1.0, -1.0])
+
+def apply_x_inversion(actions, seed):
+    """X-axis reversed. Signature: all horizontal motion is backwards."""
+    return actions * np.array([-1.0, 1.0])
+
+def apply_full_negation(actions, seed):
+    """Both axes reversed. Signature: robot moves directly away from target."""
+    return -actions
+
+# ── Axis swaps (deterministic) ─────────────────────────────────────────────
+def apply_axis_swap(actions, seed):
+    """X and Y swapped. Signature: horizontal commands produce vertical motion."""
+    return actions[:, ::-1].copy()
+
+def apply_axis_swap_y_negated(actions, seed):
+    """Axes swapped and Y negated. Signature: compound swap + one inverted axis."""
+    swapped = actions[:, ::-1].copy()
+    return swapped * np.array([1.0, -1.0])
+
+# ── Large stochastic rotations ─────────────────────────────────────────────
+def apply_large_rotation(actions, seed):
+    """Random rotation in [90°, 270°], seeded. Always a large angular offset."""
+    rng = np.random.default_rng(seed)
+    # Sample from [π/2, 3π/2] — avoids near-identity rotations
+    angle = rng.uniform(np.pi / 2, 3 * np.pi / 2)
+    c, s = np.cos(angle), np.sin(angle)
+    rot = np.array([[c, -s], [s, c]])
+    return actions @ rot.T
+
+def apply_large_rotation_neg(actions, seed):
+    """Random rotation in [-90°, -270°], seeded. Mirror of apply_large_rotation."""
+    rng = np.random.default_rng(seed)
+    angle = rng.uniform(-3 * np.pi / 2, -np.pi / 2)
+    c, s = np.cos(angle), np.sin(angle)
+    rot = np.array([[c, -s], [s, c]])
+    return actions @ rot.T
+
+# ── Random bias ────────────────────────────────────────────────────────────
+def apply_large_bias(actions, seed):
+    """Adds a large constant drift in a random direction, seeded.
+    Magnitude is comparable to the max action (0.04–0.07), so it dominates."""
+    rng = np.random.default_rng(seed)
+    angle = rng.uniform(0, 2 * np.pi)
+    magnitude = rng.uniform(0.04, 0.07)
+    bias = magnitude * np.array([np.cos(angle), np.sin(angle)])
+    return actions + bias
+
+PERTURBATION_REGISTRY = {
+    "y_inversion":          apply_y_inversion,
+    "x_inversion":          apply_x_inversion,
+    "full_negation":        apply_full_negation,
+    "axis_swap":            apply_axis_swap,
+    "axis_swap_y_negated":  apply_axis_swap_y_negated,
+    "large_rotation":       apply_large_rotation,
+    "large_rotation_neg":   apply_large_rotation_neg,
+    "large_bias":           apply_large_bias,
+}
+
+# Seeded 80/20 train/val split of perturbation keys (seed=0, fixed).
+_rng_split = np.random.default_rng(0)
+_all_keys = list(PERTURBATION_REGISTRY.keys())
+_shuffled = _rng_split.permutation(_all_keys).tolist()
+_n_train = int(round(0.7 * len(_shuffled)))
+TRAIN_PERTURBATION_KEYS: List[str] = _shuffled[:_n_train]
+VAL_PERTURBATION_KEYS:   List[str] = _shuffled[_n_train:]
+del _rng_split, _all_keys, _shuffled, _n_train
+
 async def _language_to_action_seq_async(
     state: str,
     action: str,
-    disturbance: Optional[str] = None,
     model_id: str = "gemini-3.1-flash-lite-preview",
-    max_output_tokens: int = 1024,
     timeout: float = 30.0,
 ) -> dict:
-    """Translate a natural-language action string into [y, x] action arrays.
+    """Translate a natural-language action string into [x,y] action arrays.
 
     Returns a dict with keys: true_actions, disturbance, disturbed_actions.
     """
@@ -79,28 +190,28 @@ async def _language_to_action_seq_async(
 state described in natural language: "{STATE}".
 
         The robot can move in [x,y] directions. Each action moves you \
-a maximum of 0.05 units in x and/or y direction.
+a maximum of 0.05 units in x (up/down) and/or y (left/right) direction.
 
-        You're given the following action sequence in natural language: \
-"{ACTION}". Turn this into a sequence of [x,y] actions.
+        You're given the following instruction in natural language: \
+"{ACTION}".
 
-        Here's the twist: you're an adversarial persona. Apply a deterministic disturbance to the action mapping that leads to task failure.
+        Reason about the steps needed and turn the instruction into a sequence of [x,y] actions.
+
+        If the task is impossible, return a zero action: [[0,0]].
 
         Respond in the following JSON format:
         {
-            "true_actions": [[x,y], ...],
-            "disturbance": {DISTURBANCE},
-            "disturbed_actions": [[x,y], ...]
+            "true_actions": [[x,y], ...]
         }
         """)
     prompt = prompt.replace("{STATE}", state)
     prompt = prompt.replace("{ACTION}", action)
-    prompt = prompt.replace("{DISTURBANCE}", disturbance if disturbance else "str")
 
     result = await _call_gemini_async(
         prompt, model_id=model_id,
-        max_output_tokens=max_output_tokens, timeout=timeout,
+        timeout=timeout,
     )
+    logger.debug("Gemini raw response: %s", result)
     return json.loads(result)
 
 
@@ -117,24 +228,36 @@ class GeminiPolicy:
         Clip each action component to [-action_clip, action_clip].
     model_id : str
         Gemini model identifier.
-    max_output_tokens : int
-        Maximum tokens Gemini may generate per request.
     timeout : float
         Per-request timeout in seconds.  Applies to each individual Gemini
         API call (retries each get their own timeout).
+    split : str
+        ``"train"``, ``"val"``, or ``"none"``.  Restricts perturbation
+        sampling to the corresponding 80/20 subset of ``PERTURBATION_REGISTRY``
+        (seeded, fixed).  Use ``"none"`` to disable disturbances entirely so
+        that ``disturbed_actions`` is identical to ``true_actions``.
+        Defaults to ``"train"``.
     """
 
     def __init__(
         self,
         action_clip: float = 0.1,
         model_id: str = "gemini-3.1-flash-lite-preview",
-        max_output_tokens: int = 1024,
         timeout: float = 30.0,
+        split: str = "train",
     ):
+        if split not in ("train", "val", "none"):
+            raise ValueError(f"split must be 'train', 'val', or 'none', got {split!r}")
         self.action_clip = action_clip
         self.model_id = model_id
-        self.max_output_tokens = max_output_tokens
         self.timeout = timeout
+        self.split = split
+        self.perturbation_keys = (
+            TRAIN_PERTURBATION_KEYS if split == "train" else
+            VAL_PERTURBATION_KEYS if split == "val" else
+            []
+        )
+        logger.info("GeminiPolicy split=%s, perturbations=%s", split, self.perturbation_keys)
 
     async def translate_async(
         self,
@@ -169,33 +292,50 @@ class GeminiPolicy:
                 "disturbed_actions": [],
             }
 
-        def _parse_actions(raw_list: list) -> List[np.ndarray]:
-            actions = []
-            for pair in raw_list:
-                arr = np.asarray(pair, dtype=np.float32)
-                if arr.shape != (2,):
-                    logger.warning("Skipping malformed action: %s", pair)
-                    continue
-                arr = np.clip(arr, -self.action_clip, self.action_clip)
-                if not np.isfinite(arr).all():
-                    logger.error("Non-finite action from Gemini: %s", pair)
-                    continue
-                actions.append(arr)
-            return actions
-
         max_retries = 5
         for attempt in range(1, max_retries + 1):
             try:
+
+                # remove task description from state
+                state_text_mod = state_text.split("\n")[1:]
+                state_text_mod = "\n".join(state_text_mod)
+
                 raw = await _language_to_action_seq_async(
-                    state_text, action_text, disturbance,
+                    state_text_mod, action_text,
                     model_id=self.model_id,
-                    max_output_tokens=self.max_output_tokens,
                     timeout=self.timeout,
                 )
+
+                true_actions = np.array(raw["true_actions"], dtype=np.float32)
+
+                logger.info(
+                    "Translated %d actions for: %.60s",
+                    len(true_actions), action_text,
+                )
+                logger.debug("raw prediction: %s", raw)
+                logger.debug("raw action: %s", action_text)
+                logger.debug("raw state: %s", state_text_mod)
+
+                if self.split == "none":
+                    return {
+                        "true_actions": true_actions.tolist(),
+                        "disturbance": "",
+                        "disturbed_actions": true_actions.tolist(),
+                    }
+
+                if disturbance is None:
+                    disturbance_fn = np.random.choice(self.perturbation_keys)
+                    seed = np.random.randint(0, 1000000)
+                else:
+                    disturbance_fn, seed = disturbance.split(":")
+                    seed = int(seed)
+                disturbance = f"{disturbance_fn}:{seed}"
+
+                disturbed_actions = PERTURBATION_REGISTRY[disturbance_fn](true_actions, seed)
                 return {
-                    "true_actions": _parse_actions(raw["true_actions"]),
-                    "disturbance": raw["disturbance"],
-                    "disturbed_actions": _parse_actions(raw["disturbed_actions"]),
+                    "true_actions": true_actions.tolist(),
+                    "disturbance": disturbance,
+                    "disturbed_actions": disturbed_actions.tolist(),
                 }
             except asyncio.TimeoutError:
                 logger.warning(
@@ -210,9 +350,13 @@ class GeminiPolicy:
                         "disturbed_actions": [],
                     }
             except Exception as e:
+                logger.warning("Gemini translate failed (attempt %d/%d): %s", attempt, max_retries, e)
                 if attempt == max_retries:
-                    logger.error("Gemini translate failed after %d attempts: %s", max_retries, e)
-                    raise
-                logger.warning("Gemini translate failed (attempt %d/%d): %s. Retrying...", attempt, max_retries, e)
+                    logger.error("Gemini translate failed after %d attempts, returning empty actions: %s", max_retries, e)
+                    return {
+                        "true_actions": [],
+                        "disturbance": disturbance or "",
+                        "disturbed_actions": [],
+                    }
 
 
