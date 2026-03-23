@@ -23,6 +23,41 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_action_seq(raw_actions: np.ndarray) -> np.ndarray:
+    """Ensure an action sequence has shape (N, 2).
+
+    Gemini occasionally returns extra nesting (e.g. shape (1, N, 2) or
+    (N, 1, 2)) or a flat pair (2,).  This strips spurious dimensions and
+    raises if the result cannot be reshaped to (N, 2).
+    """
+    a = np.asarray(raw_actions, dtype=np.float32)
+    if a.size == 0:
+        return a.reshape(0, 2)
+
+    # Squeeze all size-1 dims until we reach <= 2-D
+    while a.ndim > 2:
+        squeezable = [i for i in range(a.ndim) if a.shape[i] == 1]
+        if not squeezable:
+            break
+        a = a.squeeze(axis=squeezable[0])
+
+    if a.ndim > 2:
+        # Still >2-D after squeezing size-1 dims: flatten and reshape
+        a = a.reshape(-1, 2)
+    elif a.ndim == 1:
+        if a.shape[0] == 2:
+            a = a.reshape(1, 2)
+        else:
+            a = a.reshape(-1, 2)
+    # a.ndim == 2 at this point
+    if a.shape[1] != 2:
+        raise ValueError(
+            f"Cannot normalize action sequence to (N, 2): got shape {a.shape}"
+        )
+    return a
+
+
 from google import genai
 from google.genai import types
 
@@ -306,7 +341,7 @@ class GeminiPolicy:
                     timeout=self.timeout,
                 )
 
-                true_actions = np.array(raw["true_actions"], dtype=np.float32)
+                true_actions = _normalize_action_seq(raw["true_actions"])
 
                 logger.info(
                     "Translated %d actions for: %.60s",
@@ -332,6 +367,7 @@ class GeminiPolicy:
                 disturbance = f"{disturbance_fn}:{seed}"
 
                 disturbed_actions = PERTURBATION_REGISTRY[disturbance_fn](true_actions, seed)
+                disturbed_actions = _normalize_action_seq(disturbed_actions)
                 return {
                     "true_actions": true_actions.tolist(),
                     "disturbance": disturbance,
