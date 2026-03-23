@@ -304,7 +304,7 @@ class LanguageTableEnvironmentManager:
             info["disturbance"] = self._disturbances[i]
             info["won"] = bool(final_dones[i])
 
-        return observations, total_rewards, final_dones, last_infos
+        return observations, total_rewards / 100.0, final_dones, last_infos
 
     def _handle_reflect_step(self, text_actions: List[str]):
         """Store reflections from the LLM."""
