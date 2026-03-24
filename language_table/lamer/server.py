@@ -12,6 +12,7 @@ local imports adjusted.
 
 import logging
 import socket
+import time
 import traceback
 
 from .protocol import EnvRequest, EnvResponse, send_message, recv_message
@@ -28,6 +29,8 @@ _ALLOWED_METHODS = frozenset({
     "close",
     "build_text_obs",
 })
+
+_TIMED_METHODS = frozenset({"reset", "step", "restart", "reflect"})
 
 
 class EnvServer:
@@ -53,16 +56,16 @@ class EnvServer:
 
         try:
             while True:
-                logger.info("Waiting for client connection …")
+                logger.debug("Waiting for client connection …")
                 conn, addr = srv.accept()
                 logger.info("Client connected from %s", addr)
                 try:
                     self._handle_connection(conn)
                 except ConnectionError as exc:
-                    logger.warning("Client disconnected: %s", exc)
+                    logger.debug("Client disconnected: %s", exc)
                 finally:
                     conn.close()
-                    logger.info("Connection from %s closed", addr)
+                    logger.debug("Connection from %s closed", addr)
         except KeyboardInterrupt:
             logger.info("Server interrupted — shutting down")
         finally:
@@ -75,8 +78,15 @@ class EnvServer:
     def _handle_connection(self, conn: socket.socket):
         """Process requests from a single client until it disconnects or
         sends a ``close`` request."""
+        # detect dead clients instead of blocking forever
+        # keep this at 600 to ensure initial evaluation doesn't kill the server
+        conn.settimeout(600)
         while True:
-            request: EnvRequest = recv_message(conn)
+            try:
+                request: EnvRequest = recv_message(conn)
+            except socket.timeout:
+                logger.warning("Client idle for 600s — dropping connection")
+                break
             response = self._dispatch(request)
             send_message(conn, response)
             if request.method == "close":
@@ -96,7 +106,11 @@ class EnvServer:
                 )
 
             method = getattr(self.env, request.method)
+            t0 = time.monotonic()
             result = method(*request.args, **request.kwargs)
+            elapsed = time.monotonic() - t0
+            if request.method in _TIMED_METHODS:
+                logger.info("%s completed in %.3fs", request.method, elapsed)
             return EnvResponse(
                 request_id=request.request_id,
                 status="ok",

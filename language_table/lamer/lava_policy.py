@@ -16,8 +16,6 @@ Usage:
 """
 
 import logging
-import os
-import time
 from collections import deque
 from typing import Any, Dict, List, Optional
 
@@ -162,30 +160,8 @@ class LAVAPolicy:
         # Cache for tokenized instructions (instruction_str -> tokens)
         self._token_cache: Dict[str, np.ndarray] = {}
 
-        # JIT-compile forward passes
+        # JIT-compile the forward pass
         self._forward_jit = jax.jit(self._forward_fn)
-        self._forward_raw_jit = jax.jit(self._forward_raw_fn)
-
-        # Directory for NaN crash dumps — sits inside the session log dir
-        # so dumps are grouped with the env server logs for this run.
-        session_id = os.environ.get("LAVA_SESSION_ID", "no_session")
-        default_dump_dir = os.path.join(
-            os.path.expanduser("~"), "LaMer", "logs", session_id, "nan_dumps")
-        self._nan_dump_dir = os.environ.get(
-            "LAVA_NAN_DUMP_DIR", default_dump_dir)
-        self._session_id = session_id
-
-        # Rolling history of per-step action statistics for trend diagnosis.
-        # Each entry is a dict recorded in predict().  Kept in a fixed-size
-        # deque so memory stays bounded even on very long runs.
-        self._action_history_maxlen = 200
-        self._action_history: deque = deque(
-            maxlen=self._action_history_maxlen)
-        self._predict_call_count = 0
-
-        # Accumulator for per-outer-step stats.  Reset by
-        # get_and_reset_step_stats() after each outer step completes.
-        self._step_stats_accum: List[dict] = []
 
         logger.info("LAVA policy loaded (action_mean=%s, action_std=%s)",
                      self.action_mean, self.action_std)
@@ -196,14 +172,6 @@ class LAVAPolicy:
             self._token_cache[instruction_str] = _tokenize_instruction_string(
                 instruction_str, self._tokenizer)
         return self._token_cache[instruction_str]
-
-    def _forward_raw_fn(self, variables, observation):
-        """Pure function for JIT: model forward pass WITHOUT denormalization.
-
-        Returns the raw normalized action from the model, before any
-        denormalization or clipping.  Used for diagnostics only.
-        """
-        return self.model.apply(variables, observation, train=False)
 
     def _forward_fn(self, variables, observation):
         """Pure function for JIT: model forward pass.
@@ -302,194 +270,6 @@ class LAVAPolicy:
             "instruction_tokenized_clip": jnp.array(clip_batch),
         }
 
-    def _dump_nan_diagnostics(
-        self,
-        bad_indices: List[int],
-        actions: np.ndarray,
-        observation: Dict[str, jnp.ndarray],
-        goals: List[str],
-        obs_list: List[Dict[str, Any]],
-        active_mask: np.ndarray,
-    ) -> str:
-        """Dump full diagnostics when NaN/Inf actions are detected.
-
-        Saves a .npz file with everything needed to reproduce the issue and
-        logs a detailed human-readable summary.  Returns the path to the dump.
-        """
-        ts = int(time.time())
-        os.makedirs(self._nan_dump_dir, exist_ok=True)
-        dump_path = os.path.join(self._nan_dump_dir, f"nan_dump_{ts}.npz")
-
-        # ── 1. Re-run the raw (pre-denorm) forward pass for diagnosis ──
-        try:
-            raw_actions = np.array(
-                self._forward_raw_jit(self.variables, observation))
-        except Exception as e:
-            logger.error("Failed to re-run raw forward pass: %s", e)
-            raw_actions = None
-
-        # ── 2. Collect per-bad-env diagnostics ──
-        diag_lines = [
-            "=" * 72,
-            "LAVA NaN/Inf ACTION DIAGNOSTIC DUMP",
-            "=" * 72,
-            f"Session         : {self._session_id}",
-            f"Timestamp       : {ts}",
-            f"Dump file       : {dump_path}",
-            f"Bad env indices : {bad_indices}",
-            f"Total envs      : {len(goals)}",
-            f"Active envs     : {int(active_mask.sum())}",
-            "",
-            "── Denormalization stats ──",
-            f"  action_mean = {self.action_mean}",
-            f"  action_std  = {self.action_std}",
-            f"  EPS         = {EPS}",
-            f"  max(std,EPS)= {np.maximum(self.action_std, EPS)}",
-            f"  action_clip = {self.action_clip}",
-            f"  mean finite?  {np.isfinite(self.action_mean).all()}",
-            f"  std finite?   {np.isfinite(self.action_std).all()}",
-            "",
-        ]
-
-        # ── 3. Per-env breakdown ──
-        for idx in bad_indices[:10]:
-            diag_lines.append(f"── Env {idx} ──")
-            diag_lines.append(f"  goal          : {goals[idx]!r}")
-            diag_lines.append(f"  active        : {active_mask[idx]}")
-            diag_lines.append(
-                f"  final action  : {actions[idx].tolist()}")
-
-            if raw_actions is not None:
-                diag_lines.append(
-                    f"  raw (pre-denorm) action: {raw_actions[idx].tolist()}")
-                diag_lines.append(
-                    f"  raw finite?   : {np.isfinite(raw_actions[idx]).all()}")
-
-            # Observation-level checks
-            rgb_obs = observation["rgb"]
-            clip_obs = observation["instruction_tokenized_clip"]
-            rgb_i = np.array(rgb_obs[idx])
-            clip_i = np.array(clip_obs[idx])
-            diag_lines.append(
-                f"  rgb stats     : shape={rgb_i.shape}  "
-                f"min={rgb_i.min():.6f}  max={rgb_i.max():.6f}  "
-                f"mean={rgb_i.mean():.6f}  finite={np.isfinite(rgb_i).all()}")
-            diag_lines.append(
-                f"  clip tokens   : shape={clip_i.shape}  "
-                f"min={clip_i.min()}  max={clip_i.max()}")
-
-            # Frame buffer state
-            buf = self._frame_buffers[idx] if idx < len(self._frame_buffers) else None
-            if buf is not None:
-                diag_lines.append(f"  frame_buf len : {len(buf)}")
-                for fi, frame in enumerate(buf):
-                    diag_lines.append(
-                        f"    frame[{fi}]   : shape={frame.shape}  "
-                        f"min={frame.min():.6f}  max={frame.max():.6f}  "
-                        f"finite={np.isfinite(frame).all()}")
-
-            # Raw source observation
-            raw_rgb = obs_list[idx].get("rgb") if idx < len(obs_list) else None
-            if raw_rgb is not None:
-                diag_lines.append(
-                    f"  raw obs rgb   : shape={raw_rgb.shape}  "
-                    f"dtype={raw_rgb.dtype}  "
-                    f"min={raw_rgb.min()}  max={raw_rgb.max()}")
-            else:
-                diag_lines.append("  raw obs rgb   : None")
-
-            diag_lines.append("")
-
-        # ── 4. Batch-wide statistics ──
-        diag_lines.append("── Batch-wide action stats ──")
-        diag_lines.append(
-            f"  final actions : shape={actions.shape}  "
-            f"min={np.nanmin(actions):.6f}  max={np.nanmax(actions):.6f}  "
-            f"nan_count={np.isnan(actions).sum()}  "
-            f"inf_count={np.isinf(actions).sum()}")
-        if raw_actions is not None:
-            diag_lines.append(
-                f"  raw actions   : shape={raw_actions.shape}  "
-                f"min={np.nanmin(raw_actions):.6f}  "
-                f"max={np.nanmax(raw_actions):.6f}  "
-                f"nan_count={np.isnan(raw_actions).sum()}  "
-                f"inf_count={np.isinf(raw_actions).sum()}")
-
-        rgb_np = np.array(observation["rgb"])
-        diag_lines.append(
-            f"  rgb batch     : shape={rgb_np.shape}  "
-            f"min={rgb_np.min():.6f}  max={rgb_np.max():.6f}  "
-            f"nan_count={np.isnan(rgb_np).sum()}")
-        diag_lines.append("=" * 72)
-
-        # ── 5. Rolling history — show the trend leading up to the crash ──
-        history = list(self._action_history)
-        diag_lines.append(f"── Action history (last {len(history)} predict() calls) ──")
-        diag_lines.append(
-            f"  {'step':>6s}  {'robot_l2_mean':>13s}  {'robot_l2_max':>12s}  "
-            f"{'robot_abs_max':>13s}  {'model_l2_max':>12s}  {'model_abs_max':>13s}  "
-            f"{'model_nan':>9s}  {'model_inf':>9s}  {'img_nan':>7s}")
-        for h in history:
-            diag_lines.append(
-                f"  {h['step']:6d}  "
-                f"{h['vla/robot_action_l2_mean']:13.6f}  "
-                f"{h['vla/robot_action_l2_max']:12.6f}  "
-                f"{h['vla/robot_action_abs_max']:13.6f}  "
-                f"{h['vla/model_output_l2_max']:12.6f}  "
-                f"{h['vla/model_output_abs_max']:13.6f}  "
-                f"{h['vla/model_output_nan_count']:9d}  "
-                f"{h['vla/model_output_inf_count']:9d}  "
-                f"{h['vla/image_nan_count']:7d}")
-        diag_lines.append("=" * 72)
-
-        # ── 6. Log everything ──
-        full_msg = "\n".join(diag_lines)
-        logger.error("\n%s", full_msg)
-
-        # ── 7. Save .npz with arrays for offline reproduction ──
-        save_dict = {
-            "bad_indices": np.array(bad_indices),
-            "actions": actions,
-            "active_mask": active_mask,
-            "action_mean": self.action_mean,
-            "action_std": self.action_std,
-            "rgb_obs": np.array(observation["rgb"]),
-            "clip_obs": np.array(observation["instruction_tokenized_clip"]),
-        }
-        if raw_actions is not None:
-            save_dict["raw_actions"] = raw_actions
-
-        # Save rolling history as structured arrays for plotting
-        if history:
-            for key in history[0]:
-                save_dict[f"history_{key}"] = np.array(
-                    [h[key] for h in history])
-
-        # Save raw source RGB for bad envs (uint8, before preprocessing)
-        for idx in bad_indices[:10]:
-            raw_rgb = obs_list[idx].get("rgb") if idx < len(obs_list) else None
-            if raw_rgb is not None:
-                save_dict[f"raw_rgb_env{idx}"] = raw_rgb
-
-        # Save goals as a separate text file alongside the npz
-        goals_path = dump_path.replace(".npz", "_goals.txt")
-        try:
-            with open(goals_path, "w") as f:
-                for i, g in enumerate(goals):
-                    marker = " *** BAD ***" if i in bad_indices else ""
-                    f.write(f"[{i:3d}] active={active_mask[i]} {g!r}{marker}\n")
-        except Exception as e:
-            logger.error("Failed to write goals file: %s", e)
-
-        try:
-            np.savez_compressed(dump_path, **save_dict)
-            logger.error("Diagnostic dump saved to: %s", dump_path)
-            logger.error("Goals saved to: %s", goals_path)
-        except Exception as e:
-            logger.error("Failed to save diagnostic dump: %s", e)
-
-        return dump_path
-
     def predict(
         self,
         goals: List[str],
@@ -530,118 +310,38 @@ class LAVAPolicy:
         # Build batched input (also updates frame buffers)
         observation = self._build_batch(goals, obs_list, active_mask)
 
-        # Run both the full forward pass and the raw (pre-denorm) pass.
-        # The raw pass is cheap (same JIT'd model, no extra GPU work beyond
-        # skipping denorm) and gives us the trend data we need.
+        rgb_obs = np.asarray(observation["rgb"])
+        clip_obs = np.asarray(observation["instruction_tokenized_clip"])
+        rgb_finite = bool(np.isfinite(rgb_obs).all())
+        if not rgb_finite:
+            nan_envs = np.flatnonzero(
+                ~np.isfinite(rgb_obs.reshape(len(goals), -1)).all(axis=1)
+            ).tolist()
+            logger.error("Non-finite RGB inputs for envs=%s", nan_envs[:10])
+
+        # Run JIT-compiled forward pass (denormalization + clip included)
         actions = np.array(self._forward_jit(self.variables, observation))
-        raw_actions = np.array(
-            self._forward_raw_jit(self.variables, observation))
-
-        # Record per-step statistics into the rolling history.
-        #
-        # Naming convention:
-        #   "robot_action"  = final 2D action sent to PyBullet (after denorm + clip)
-        #   "model_output"  = raw network output before denormalization
-        #   "l2"            = L2 (Euclidean) vector magnitude
-        #   "abs_max"       = largest absolute scalar component
-        self._predict_call_count += 1
-        active_actions = actions[active_mask]
-        active_raw = raw_actions[active_mask]
-        rgb_np = np.array(observation["rgb"])
-        active_rgb = rgb_np[active_mask]
-        step_record = {
-            "step": self._predict_call_count,
-            # Robot actions (what PyBullet receives)
-            "vla/robot_action_l2_mean": float(np.linalg.norm(active_actions, axis=1).mean()),
-            "vla/robot_action_l2_max": float(np.linalg.norm(active_actions, axis=1).max()),
-            "vla/robot_action_abs_max": float(np.abs(active_actions).max()),
-            "vla/robot_action_nan_count": int(np.isnan(active_actions).sum()),
-            "vla/robot_action_inf_count": int(np.isinf(active_actions).sum()),
-            # Model output (before denormalization — if this blows up, the
-            # network itself is numerically unstable)
-            "vla/model_output_l2_mean": float(np.linalg.norm(active_raw, axis=1).mean()),
-            "vla/model_output_l2_max": float(np.linalg.norm(active_raw, axis=1).max()),
-            "vla/model_output_abs_max": float(np.abs(active_raw).max()),
-            "vla/model_output_nan_count": int(np.isnan(active_raw).sum()),
-            "vla/model_output_inf_count": int(np.isinf(active_raw).sum()),
-            # Image observations fed to VLA
-            "vla/image_pixel_mean": float(active_rgb.mean()),
-            "vla/image_pixel_max": float(active_rgb.max()),
-            "vla/image_nan_count": int(np.isnan(active_rgb).sum()),
-            # Counts
-            "vla/n_active_envs": int(active_mask.sum()),
-        }
-        self._action_history.append(step_record)
-        self._step_stats_accum.append(step_record)
-
         invalid_action_mask = ~np.isfinite(actions).all(axis=1)
         if invalid_action_mask.any():
             bad_indices = np.flatnonzero(invalid_action_mask).tolist()
-            dump_path = self._dump_nan_diagnostics(
-                bad_indices, actions, observation, goals, obs_list, active_mask,
-            )
-            raise ValueError(
-                f"LAVA produced non-finite actions for envs={bad_indices[:10]}"
-                f" (diagnostics saved to {dump_path})"
-            )
+
+            diag_lines = [
+                f"LAVA non-finite actions for envs={bad_indices[:10]}",
+                f"  rgb_all_finite={rgb_finite}  rgb_range=[{float(rgb_obs.min()):.3f}, {float(rgb_obs.max()):.3f}]",
+            ]
+            for idx in bad_indices[:5]:
+                tokens = clip_obs[idx, 0].tolist()
+                nonzero_tokens = [t for t in tokens if t != 0]
+                diag_lines.append(
+                    f"  env={idx}  goal={goals[idx][:160]!r}"
+                    f"  action={actions[idx].tolist()}"
+                    f"  clip_tokens({len(nonzero_tokens)} nonzero)={nonzero_tokens[:15]}"
+                )
+            diag_msg = "\n".join(diag_lines)
+            logger.error(diag_msg)
+            raise ValueError(diag_msg)
 
         # Zero out inactive envs
         actions[~active_mask] = 0.0
 
         return [actions[i].astype(np.float32) for i in range(batch_size)]
-
-    def get_and_reset_step_stats(self) -> Dict[str, float]:
-        """Aggregate VLA stats across all inner-loop predict() calls since the
-        last call to this method, then reset the accumulator.
-
-        Called once per outer step (i.e. per LLM action) by the env manager.
-        Returns a flat dict suitable for merging into infos and ultimately
-        into wandb metrics.
-
-        Aggregation rules:
-        - l2_mean, image_pixel_mean  → averaged across inner steps
-        - l2_max, abs_max, pixel_max → max across inner steps
-        - nan/inf counts             → summed across inner steps
-        - n_active_envs              → from last inner step
-        - n_inner_steps              → count of predict() calls
-        """
-        records = self._step_stats_accum
-        self._step_stats_accum = []
-
-        if not records:
-            return {}
-
-        result: Dict[str, float] = {}
-        result["vla/n_inner_steps"] = float(len(records))
-
-        # Keys and how to aggregate them
-        _MEAN_KEYS = [
-            "vla/robot_action_l2_mean",
-            "vla/model_output_l2_mean",
-            "vla/image_pixel_mean",
-        ]
-        _MAX_KEYS = [
-            "vla/robot_action_l2_max",
-            "vla/robot_action_abs_max",
-            "vla/model_output_l2_max",
-            "vla/model_output_abs_max",
-            "vla/image_pixel_max",
-        ]
-        _SUM_KEYS = [
-            "vla/robot_action_nan_count",
-            "vla/robot_action_inf_count",
-            "vla/model_output_nan_count",
-            "vla/model_output_inf_count",
-            "vla/image_nan_count",
-        ]
-
-        for key in _MEAN_KEYS:
-            result[key] = float(np.mean([r[key] for r in records]))
-        for key in _MAX_KEYS:
-            result[key] = float(np.max([r[key] for r in records]))
-        for key in _SUM_KEYS:
-            result[key] = float(np.sum([r[key] for r in records]))
-
-        result["vla/n_active_envs"] = records[-1]["vla/n_active_envs"]
-
-        return result
