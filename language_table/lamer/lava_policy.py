@@ -197,11 +197,11 @@ class LAVAPolicy:
         Clip actions to [-action_clip, action_clip] (default: 0.1).
     preprocess_mode : str
         Image preprocessing strategy for ``_build_batch``:
-        - ``"original"`` — per-image TF ops (default, baseline).
-        - ``"batched_tf"`` — batch all images into one TF call (~2.3x faster,
-          bit-exact with original).
-        - ``"jax_gpu"`` — preprocess on GPU via JAX (~2.6x faster for large
-          batches, ~2.4e-7 max float32 error vs original).
+        - ``"original"`` — per-image TF ops (baseline).
+        - ``"batched_tf"`` — batch all images into one TF call (default;
+          ~2x end-to-end speedup, bit-exact with original).
+        - ``"jax_gpu"`` — preprocess on GPU via JAX (~2.1x end-to-end
+          speedup, ~6e-4 max action error vs original).
     """
 
     def __init__(
@@ -211,7 +211,7 @@ class LAVAPolicy:
         model_config: Optional[dict] = None,
         sequence_length: int = 4,
         action_clip: float = 0.1,
-        preprocess_mode: str = "original",
+        preprocess_mode: str = "batched_tf",
     ):
         if preprocess_mode not in PREPROCESS_MODES:
             raise ValueError(
