@@ -4,10 +4,10 @@
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
-#SBATCH --time=1:00:00
+#SBATCH --gres=gpu:8
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=800G
+#SBATCH --time=2:00:00
 
 # Submit from the language-table repo root:
 #   sbatch language_table/lamer/optim/run_bench.slurm
