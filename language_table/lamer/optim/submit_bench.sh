@@ -30,8 +30,10 @@ export LANGTABLE_CONDA_ENV="${LANGTABLE_CONDA_ENV:-ltvenv}"
 export BATCH_SIZES="${BATCH_SIZES:-1,4,16,64,256,512,1024,2048}"
 export NUM_WARMUP="${NUM_WARMUP:-3}"
 export NUM_ITERS="${NUM_ITERS:-10}"
-export IMG_H="${IMG_H:-480}"
-export IMG_W="${IMG_W:-640}"
+export IMG_H="${IMG_H:-180}"
+export IMG_W="${IMG_W:-320}"
+export DISCREPANCY_BS="${DISCREPANCY_BS:-64}"
+export DISCREPANCY_STEPS="${DISCREPANCY_STEPS:-3}"
 
 # Export cache dirs so SLURM job inherits them
 export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-}"

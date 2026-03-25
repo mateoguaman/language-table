@@ -65,8 +65,10 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 BATCH_SIZES="${BATCH_SIZES:-1,4,16,64,256,512,1024,2048}"
 NUM_WARMUP="${NUM_WARMUP:-3}"
 NUM_ITERS="${NUM_ITERS:-10}"
-IMG_H="${IMG_H:-480}"
-IMG_W="${IMG_W:-640}"
+IMG_H="${IMG_H:-180}"
+IMG_W="${IMG_W:-320}"
+DISCREPANCY_BS="${DISCREPANCY_BS:-64}"
+DISCREPANCY_STEPS="${DISCREPANCY_STEPS:-3}"
 
 # --- Output ---
 OUTPUT_DIR="${LAMER_DIR:+${LAMER_DIR}/benchmarks/results/optim-$(date +%Y%m%d-%H%M%S)}"
@@ -90,8 +92,15 @@ echo ""
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 echo ""
 
-LOG_FILE="${OUTPUT_DIR:+${OUTPUT_DIR}/optim_bench.log}"
-LOG_FILE="${LOG_FILE:-optim_bench_$(date +%Y%m%d-%H%M%S).log}"
+BENCH_LOG="${OUTPUT_DIR:+${OUTPUT_DIR}/optim_bench.log}"
+BENCH_LOG="${BENCH_LOG:-optim_bench_$(date +%Y%m%d-%H%M%S).log}"
+DISCREPANCY_LOG="${OUTPUT_DIR:+${OUTPUT_DIR}/discrepancy.log}"
+DISCREPANCY_LOG="${DISCREPANCY_LOG:-discrepancy_$(date +%Y%m%d-%H%M%S).log}"
+
+# ---- Part 1: Performance benchmark ----
+echo "============================================"
+echo "Part 1/2: Performance benchmark"
+echo "============================================"
 
 python -m language_table.lamer.optim.bench \
     --batch_sizes "${BATCH_SIZES}" \
@@ -99,8 +108,24 @@ python -m language_table.lamer.optim.bench \
     --num_iters "${NUM_ITERS}" \
     --img_h "${IMG_H}" \
     --img_w "${IMG_W}" \
-    2>&1 | tee "${LOG_FILE}"
+    2>&1 | tee "${BENCH_LOG}"
+
+# ---- Part 2: Numerical discrepancy analysis ----
+echo ""
+echo "============================================"
+echo "Part 2/2: Numerical discrepancy analysis"
+echo "============================================"
+
+python -m language_table.lamer.optim.measure_discrepancy \
+    --batch_size "${DISCREPANCY_BS}" \
+    --img_h "${IMG_H}" \
+    --img_w "${IMG_W}" \
+    --steps "${DISCREPANCY_STEPS}" \
+    2>&1 | tee "${DISCREPANCY_LOG}"
 
 echo ""
-echo "Done. Log: ${LOG_FILE}"
+echo "============================================"
+echo "Done."
+echo "  Benchmark log:    ${BENCH_LOG}"
+echo "  Discrepancy log:  ${DISCREPANCY_LOG}"
 echo "END: $(date)"
