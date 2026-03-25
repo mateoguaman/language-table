@@ -237,7 +237,7 @@ def main():
     if results:
         print(f"\n{'Envs':>6} | {'Inner Steps':>12} | {'VLA Time (s)':>13} | Notes")
         print("-" * 60)
-        for target_envs in [16, 32, 64, 128, 256]:
+        for target_envs in [16, 32, 64, 128, 256, 512, 1024]:
             matching = [r for r in results if r["batch_size"] >= target_envs]
             if not matching:
                 print(f"{target_envs:>6} | {'---':>12} | {'---':>13} | exceeds max batch")
