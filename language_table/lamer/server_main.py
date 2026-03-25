@@ -46,7 +46,7 @@ REWARD_TYPES = {
 logger = logging.getLogger(__name__)
 
 
-def _load_vla_policy(checkpoint_path):
+def _load_vla_policy(checkpoint_path, preprocess_mode="original"):
     """Load a shared LAVA VLA policy from a checkpoint path."""
     from .lava_policy import LAVAPolicy
 
@@ -55,12 +55,13 @@ def _load_vla_policy(checkpoint_path):
         os.path.basename(checkpoint_path).rsplit("_", 1)[0] + "_"
     )
     logger.info(
-        "Loading LAVA policy from %s (prefix=%s)",
-        checkpoint_dir, checkpoint_prefix,
+        "Loading LAVA policy from %s (prefix=%s, preprocess_mode=%s)",
+        checkpoint_dir, checkpoint_prefix, preprocess_mode,
     )
     policy = LAVAPolicy(
         checkpoint_dir=checkpoint_dir,
         checkpoint_prefix=checkpoint_prefix,
+        preprocess_mode=preprocess_mode,
     )
     logger.info("LAVA policy loaded successfully.")
     return policy
@@ -144,7 +145,8 @@ def _run_single(args):
 
     vla_policy = None
     if args.vla_checkpoint:
-        vla_policy = _load_vla_policy(args.vla_checkpoint)
+        vla_policy = _load_vla_policy(
+            args.vla_checkpoint, args.preprocess_mode)
 
     manager = _create_manager(envs, args, vla_policy, args.split, args.group_n)
 
@@ -166,7 +168,8 @@ def _run_unified(args):
     # Load one shared VLA model
     vla_policy = None
     if args.vla_checkpoint:
-        vla_policy = _load_vla_policy(args.vla_checkpoint)
+        vla_policy = _load_vla_policy(
+            args.vla_checkpoint, args.preprocess_mode)
 
     # Create train env pool
     logger.info(
@@ -248,6 +251,9 @@ def main():
     parser.add_argument("--no_render", action="store_true")
     parser.add_argument("--include_rgb", action="store_true")
     parser.add_argument("--vla_checkpoint", type=str, default=None)
+    parser.add_argument("--preprocess_mode", type=str, default="original",
+                        choices=["original", "batched_tf", "jax_gpu"],
+                        help="Image preprocessing strategy for LAVA _build_batch")
     parser.add_argument("--policy", type=str, default="lava",
                         choices=["lava", "gemini"])
     parser.add_argument("--gemini_timeout", type=float, default=30.0)
