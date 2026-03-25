@@ -15,6 +15,9 @@ from language_table.environments.rewards.block2relativelocation import BlockToRe
 from language_table.environments.rewards.block2block_relative_location import BlockToBlockRelativeLocationReward
 from language_table.environments.rewards.point2block import PointToBlockReward
 from language_table.environments.rewards.separate_blocks import SeparateBlocksReward
+from language_table.environments.rewards.sort_colors_to_corners import SortColorsToCornersFixedReward
+from language_table.environments.rewards.sort_colors_to_corners import SortColorsToCornersReward
+from language_table.environments.rewards.sort_colors_to_corners import SortColorsToCornersPartialReward
 from language_table.environments.rewards.composite import CompositeReward
 
 REWARD_TYPES = {
@@ -25,6 +28,9 @@ REWARD_TYPES = {
     "block2block_relative_location": BlockToBlockRelativeLocationReward,
     "point2block": PointToBlockReward,
     "separate_blocks": SeparateBlocksReward,
+    "sort_colors_fixed": SortColorsToCornersFixedReward,
+    "sort_colors": SortColorsToCornersReward,
+    "sort_colors_partial_reward": SortColorsToCornersPartialReward,
     "none": None,
 }
 

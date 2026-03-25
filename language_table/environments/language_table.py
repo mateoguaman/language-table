@@ -589,7 +589,7 @@ class LanguageTable(gym.Env):
         viewMatrix=viewm,
         projectionMatrix=projm,
         flags=pybullet.ER_SEGMENTATION_MASK_OBJECT_AND_LINKINDEX,
-        renderer=pybullet.ER_TINY_RENDERER)
+        renderer=pybullet.ER_BULLET_HARDWARE_OPENGL)
 
     # Get color image.
     color_image_size = (image_size[0], image_size[1], 4)
@@ -807,6 +807,14 @@ class LanguageTable(gym.Env):
       self._start_block = info.block1
       self._oracle_target_block = info.goal
       self._oracle_target_translation = None
+      self._target_absolute_location = None
+      self._target_relative_location = None
+    elif isinstance(info, task_info.SortColorsToCornersTaskInfo):
+      instruction_str = info.instruction
+      first_block = next(iter(info.block_to_target))
+      self._start_block = first_block
+      self._oracle_target_block = None
+      self._oracle_target_translation = info.block_to_target[first_block]
       self._target_absolute_location = None
       self._target_relative_location = None
     else:

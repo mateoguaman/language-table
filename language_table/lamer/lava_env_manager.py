@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 
 import numpy as np
 
+from .frame_annotator import annotate_frames
 from .state_to_text import batch_state_to_text
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,7 @@ class LanguageTableEnvironmentManager:
         vla_policy=None,
         include_rgb=False,
         split="train",
+        frame_subsample=5,
     ):
         self.envs = envs
         self.num_processes = envs.num_processes
@@ -72,6 +74,7 @@ class LanguageTableEnvironmentManager:
         self.vla = vla_policy
         self._include_rgb = include_rgb
         self.split = split
+        self._frame_subsample = max(1, frame_subsample)
 
         # Action space bounds (Language Table uses [-0.1, 0.1]^2)
         self._action_low = -0.1
@@ -268,6 +271,11 @@ class LanguageTableEnvironmentManager:
         last_infos = [{} for _ in range(batch)]
         self._last_goal_strings = list(goal_strings)
 
+        all_frames = [[] for _ in range(batch)]
+        for i in range(batch):
+            if "rgb" in self._last_obs_list[i]:
+                all_frames[i].append(self._last_obs_list[i]["rgb"].copy())
+
         # Seed the VLA with the obs cached from reset()/restart().
         # After the first env.step(), we use its returned obs instead — just
         # like the original eval loop: obs = env.reset(); while: action =
@@ -328,6 +336,11 @@ class LanguageTableEnvironmentManager:
             if self.vla is not None:
                 obs_list_for_vla = obs_list
 
+            if (inner_step + 1) % self._frame_subsample == 0:
+                for i in range(batch):
+                    if active_mask[i] and "rgb" in obs_list[i]:
+                        all_frames[i].append(obs_list[i]["rgb"].copy())
+
             rewards = np.array(rewards, dtype=np.float32)
             dones = np.array(dones, dtype=bool)
 
@@ -366,7 +379,6 @@ class LanguageTableEnvironmentManager:
         self._last_text_obs = text_obs
         self._last_obs_list = final_obs
         self._last_infos = last_infos
-        self.curr_turn_idx += 1
 
         observations = {
             "text": text_obs,
@@ -377,6 +389,15 @@ class LanguageTableEnvironmentManager:
         for i, info in enumerate(last_infos):
             info["is_action_valid"] = np.array(1.0)
             info["won"] = bool(final_dones[i])
+            info["frames"] = annotate_frames(
+                all_frames[i],
+                traj_idx=self.curr_traj_idx,
+                turn_idx=self.curr_turn_idx,
+                instruction=goal_strings[i],
+            )
+            info["language_instruction"] = goal_strings[i]
+
+        self.curr_turn_idx += 1
 
         return observations, total_rewards / 100.0, final_dones, last_infos
 

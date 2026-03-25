@@ -16,7 +16,7 @@
 """Data classes holding info returned to environment for each reset."""
 
 import dataclasses
-from typing import List
+from typing import Dict, List
 
 import numpy as np
 
@@ -89,6 +89,14 @@ class Point2BlockTaskInfo:
   block_target: str
 
 
+@dataclasses.dataclass
+class SortColorsToCornersTaskInfo:
+  """Class defining a chosen 'sort colors to corners' task after reset."""
+  instruction: str
+  color_to_corner: Dict[str, str]
+  block_to_target: Dict[str, np.ndarray]
+
+
 ALL_TASKS = [
     Block2BlockTaskInfo,
     Block2LocationTaskInfo,
@@ -98,6 +106,7 @@ ALL_TASKS = [
     Point2BlockTaskInfo,
     Block2LineTaskInfo,
     Block2PoleTaskInfo,
+    SortColorsToCornersTaskInfo,
 ]
 
 # Return this if cannot create a valid board state and need to reset.

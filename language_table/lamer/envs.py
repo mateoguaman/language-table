@@ -326,11 +326,11 @@ class LanguageTableMultiProcessEnv:
     def reset(self):
         """Reset all envs with unique seeds."""
         if self.is_train:
-            seeds = np.random.randint(0, 2**16 - 1, size=self.env_num)
+            seeds = np.random.randint(0, 2**16 - 1, size=self.num_processes)
         else:
-            seeds = np.random.randint(2**16, 2**32 - 1, size=self.env_num)
+            seeds = np.random.randint(2**16, 2**32 - 1, size=self.num_processes)
 
-        seeds = np.repeat(seeds, self.group_n).tolist()
+        seeds = seeds.tolist()
 
         futures = [w.reset.remote(seed=s) for w, s in zip(self.workers, seeds)]
         results = ray.get(futures, timeout=self.timeout)

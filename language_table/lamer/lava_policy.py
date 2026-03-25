@@ -16,7 +16,6 @@ Usage:
 """
 
 import logging
-from collections import deque
 from typing import Any, Dict, List, Optional
 
 import cv2
@@ -54,33 +53,42 @@ EPS = np.finfo(np.float32).eps
 
 
 def _preprocess_rgb(rgb_uint8):
-    """Preprocess a single RGB image to match the eval pipeline exactly.
+    """Preprocess a single RGB image (OpenCV, for debugging / single-env use).
 
     Replicates CentralCropImageWrapper from language_table/eval/wrappers.py:
-      1. tf.image.convert_image_dtype(uint8 -> float32)  =>  divide by 255
-      2. Central crop with factor 0.95 (matching random crop at eval time)
-      3. tf.image.resize to (180, 320) with bilinear interpolation
-
-    Using TF ops to ensure bit-identical results with the original eval code.
+      1. uint8 -> float32 (divide by 255)
+      2. Central crop with factor 0.95
+      3. Bilinear resize to (180, 320)
     """
-    image = tf.image.convert_image_dtype(rgb_uint8, dtype=tf.float32)
+    image = rgb_uint8.astype(np.float32) / 255.0
+    h, w = image.shape[:2]
+    sh, sw = int(h * RANDOM_CROP_FACTOR), int(w * RANDOM_CROP_FACTOR)
+    oh, ow = (h - sh) // 2, (w - sw) // 2
+    image = image[oh:oh + sh, ow:ow + sw]
+    return cv2.resize(
+        image, (DATA_TARGET_WIDTH, DATA_TARGET_HEIGHT),
+        interpolation=cv2.INTER_LINEAR)
 
-    # Central crop — matches crop_test_image() in eval/wrappers.py
-    raw_h = tf.cast(tf.shape(image)[0], tf.float32)
-    raw_w = tf.cast(tf.shape(image)[1], tf.float32)
-    scaled_h = raw_h * RANDOM_CROP_FACTOR
-    scaled_w = raw_w * RANDOM_CROP_FACTOR
-    offset_h = tf.cast((raw_h - scaled_h) // 2, tf.int32)
-    offset_w = tf.cast((raw_w - scaled_w) // 2, tf.int32)
-    target_h = tf.cast(scaled_h, tf.int32)
-    target_w = tf.cast(scaled_w, tf.int32)
-    image = tf.image.crop_to_bounding_box(
-        image, offset_h, offset_w, target_h, target_w)
 
-    # Resize — matches resize_images() in eval/wrappers.py
-    image = tf.image.resize(image, [DATA_TARGET_HEIGHT, DATA_TARGET_WIDTH])
+def _preprocess_rgb_batch(rgb_uint8_batch):
+    """Preprocess a batch of RGB images via JAX on GPU.
 
-    return image.numpy()
+    CPU: central crop (numpy slice — zero-copy view).
+    GPU: uint8 → float32 conversion + bilinear resize (parallel across batch).
+
+    Returns a JAX array that stays on GPU.
+    """
+    h, w = rgb_uint8_batch.shape[1], rgb_uint8_batch.shape[2]
+    sh = int(h * RANDOM_CROP_FACTOR)
+    sw = int(w * RANDOM_CROP_FACTOR)
+    oh = (h - sh) // 2
+    ow = (w - sw) // 2
+    cropped = rgb_uint8_batch[:, oh:oh + sh, ow:ow + sw, :]
+    images = jnp.array(cropped, dtype=jnp.float32) / 255.0
+    n = images.shape[0]
+    return jax.image.resize(
+        images, (n, DATA_TARGET_HEIGHT, DATA_TARGET_WIDTH, 3),
+        method='bilinear')
 
 
 def _tokenize_instruction_string(instruction_str, tokenizer):
@@ -126,7 +134,9 @@ class LAVAPolicy:
     ):
         self.sequence_length = sequence_length
         self.action_clip = action_clip
-        self._frame_buffers: List[deque] = []
+        self._num_envs = 0
+        self._frame_array: Optional[jnp.ndarray] = None
+        self._frame_step: Optional[np.ndarray] = None
 
         # Build model — same as eval/main.py line 76
         config = model_config or DEFAULT_MODEL_CONFIG
@@ -188,29 +198,53 @@ class LAVAPolicy:
         return action
 
     def reset(self, num_envs: int):
-        """Clear frame history buffers for all environments.
+        """Clear frame history for all environments.
 
-        Mirrors HistoryWrapper behavior: on reset, the buffer is empty
-        and will be filled by tiling the first frame.
+        Allocates a single contiguous frame array on GPU instead of
+        per-env deques, and a CPU counter to track first-step tiling.
         """
-        self._frame_buffers = [
-            deque(maxlen=self.sequence_length) for _ in range(num_envs)
-        ]
+        self._num_envs = num_envs
+        self._frame_array = jnp.zeros(
+            (num_envs, self.sequence_length, DATA_TARGET_HEIGHT,
+             DATA_TARGET_WIDTH, 3), dtype=jnp.float32)
+        self._frame_step = np.zeros(num_envs, dtype=np.int64)
 
-    def _update_frame_buffer(self, env_idx: int, rgb_uint8: np.ndarray):
-        """Update a single env's frame history.
+    def _update_frame_buffers_batch(
+        self,
+        env_indices: List[int],
+        rgb_list: List[np.ndarray],
+    ):
+        """Batch-update frame histories for multiple envs.
 
-        Matches HistoryWrapper(tile_first_step_obs=True):
-        - First call after reset: tile the frame to fill the buffer
-        - Subsequent calls: append (deque auto-evicts oldest)
+        Preprocesses all RGB images on GPU via JAX, then updates the
+        pre-allocated frame array with vectorized scatter operations
+        (no per-env Python loop).
         """
-        frame = _preprocess_rgb(rgb_uint8)
-        buf = self._frame_buffers[env_idx]
-        if len(buf) == 0:
-            for _ in range(self.sequence_length):
-                buf.append(frame)
-        else:
-            buf.append(frame)
+        if not rgb_list:
+            return
+
+        preprocessed = _preprocess_rgb_batch(np.stack(rgb_list, axis=0))
+
+        idx = np.array(env_indices)
+        is_first = self._frame_step[idx] == 0
+
+        if is_first.any():
+            first_env = idx[is_first]
+            tiled = jnp.repeat(
+                preprocessed[is_first][:, None],
+                self.sequence_length, axis=1)
+            self._frame_array = self._frame_array.at[first_env].set(tiled)
+
+        cont_mask = ~is_first
+        if cont_mask.any():
+            cont_env = idx[cont_mask]
+            shifted = jnp.concatenate(
+                [self._frame_array[cont_env, 1:],
+                 preprocessed[cont_mask][:, None]],
+                axis=1)
+            self._frame_array = self._frame_array.at[cont_env].set(shifted)
+
+        self._frame_step[idx] += 1
 
     def _build_batch(
         self,
@@ -224,10 +258,15 @@ class LAVAPolicy:
         BCJaxPyPolicy pipeline creates:
           rgb: (B, seq_len, H, W, 3) float32
           instruction_tokenized_clip: (B, seq_len, 77) int32
+
+        The frame array is already maintained on GPU as a contiguous
+        (N, seq_len, H, W, 3) buffer, so no per-env stacking or
+        CPU→GPU transfer is needed for RGB data.
         """
         batch_size = len(goals)
 
-        # Update frame buffers with new observations
+        active_indices = []
+        active_rgbs = []
         for i in range(batch_size):
             if not active_mask[i]:
                 continue
@@ -235,38 +274,21 @@ class LAVAPolicy:
             if rgb is None:
                 logger.warning("Env %d: no 'rgb' in obs, skipping", i)
                 continue
-            self._update_frame_buffer(i, rgb)
+            active_indices.append(i)
+            active_rgbs.append(rgb)
 
-        # Allocate batched arrays
-        rgb_batch = np.zeros(
-            (batch_size, self.sequence_length, DATA_TARGET_HEIGHT,
-             DATA_TARGET_WIDTH, 3),
-            dtype=np.float32)
+        self._update_frame_buffers_batch(active_indices, active_rgbs)
 
-        # HistoryWrapper stacks all obs keys along seq axis, so the model
-        # sees instruction_tokenized_clip as (B, seq_len, 77).
-        # The encoder takes [:, 0] to get (B, 77) for the CLIP TextEncoder.
         clip_batch = np.zeros(
             (batch_size, self.sequence_length, 77), dtype=np.int32)
-
         for i in range(batch_size):
             if not active_mask[i]:
                 continue
-
-            # Stack frame history into (seq_len, H, W, 3)
-            buf = self._frame_buffers[i]
-            if len(buf) > 0:
-                rgb_batch[i] = np.stack(list(buf), axis=0)
-
-            # Tokenize goal string — same for all timesteps in the sequence,
-            # matching ClipTokenWrapper which tokenizes once on reset and
-            # reuses for all steps
             tokens = self._tokenize(goals[i])
-            for t in range(self.sequence_length):
-                clip_batch[i, t] = tokens
+            clip_batch[i] = tokens[None]
 
         return {
-            "rgb": jnp.array(rgb_batch),
+            "rgb": self._frame_array,
             "instruction_tokenized_clip": jnp.array(clip_batch),
         }
 
@@ -310,12 +332,11 @@ class LAVAPolicy:
         # Build batched input (also updates frame buffers)
         observation = self._build_batch(goals, obs_list, active_mask)
 
-        rgb_obs = np.asarray(observation["rgb"])
-        clip_obs = np.asarray(observation["instruction_tokenized_clip"])
-        rgb_finite = bool(np.isfinite(rgb_obs).all())
+        rgb_finite = bool(jnp.isfinite(observation["rgb"]).all())
         if not rgb_finite:
+            rgb_obs_np = np.asarray(observation["rgb"])
             nan_envs = np.flatnonzero(
-                ~np.isfinite(rgb_obs.reshape(len(goals), -1)).all(axis=1)
+                ~np.isfinite(rgb_obs_np.reshape(len(goals), -1)).all(axis=1)
             ).tolist()
             logger.error("Non-finite RGB inputs for envs=%s", nan_envs[:10])
 
@@ -324,13 +345,15 @@ class LAVAPolicy:
         invalid_action_mask = ~np.isfinite(actions).all(axis=1)
         if invalid_action_mask.any():
             bad_indices = np.flatnonzero(invalid_action_mask).tolist()
+            rgb_obs_np = np.asarray(observation["rgb"])
+            clip_obs_np = np.asarray(observation["instruction_tokenized_clip"])
 
             diag_lines = [
                 f"LAVA non-finite actions for envs={bad_indices[:10]}",
-                f"  rgb_all_finite={rgb_finite}  rgb_range=[{float(rgb_obs.min()):.3f}, {float(rgb_obs.max()):.3f}]",
+                f"  rgb_all_finite={rgb_finite}  rgb_range=[{float(rgb_obs_np.min()):.3f}, {float(rgb_obs_np.max()):.3f}]",
             ]
             for idx in bad_indices[:5]:
-                tokens = clip_obs[idx, 0].tolist()
+                tokens = clip_obs_np[idx, 0].tolist()
                 nonzero_tokens = [t for t in tokens if t != 0]
                 diag_lines.append(
                     f"  env={idx}  goal={goals[idx][:160]!r}"
