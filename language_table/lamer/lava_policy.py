@@ -361,8 +361,8 @@ class LAVAPolicy:
                     f"  clip_tokens({len(nonzero_tokens)} nonzero)={nonzero_tokens[:15]}"
                 )
             diag_msg = "\n".join(diag_lines)
-            logger.error(diag_msg)
-            raise ValueError(diag_msg)
+            logger.warning(diag_msg)
+            actions[invalid_action_mask] = 0.0
 
         # Zero out inactive envs
         actions[~active_mask] = 0.0
