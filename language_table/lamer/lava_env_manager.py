@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 import numpy as np
 
 from .frame_annotator import annotate_frames
-from .state_to_text import batch_state_to_text
+from .state_to_text import batch_state_to_text, _decode_instruction
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,7 @@ class LanguageTableEnvironmentManager:
         # Raw obs dicts cached for VLA (needs RGB at the start of each inner loop)
         self._last_obs_list: List[Dict] = [{} for _ in range(self.num_processes)]
         self._last_goal_strings: List[str] = [""] * self.num_processes
+        self._task_strings: List[str] = [""] * self.num_processes
 
     def _log_step_failure(
         self,
@@ -126,6 +127,14 @@ class LanguageTableEnvironmentManager:
     # Core interface
     # ------------------------------------------------------------------
 
+    def _extract_task_strings(self, obs_list):
+        """Decode the environment task instruction from each observation."""
+        tasks = []
+        for obs in obs_list:
+            instr = obs.get("instruction")
+            tasks.append(_decode_instruction(instr) if instr is not None else "")
+        return tasks
+
     def _extract_images(self, obs_list):
         """Extract RGB images from obs dicts for the client response.
 
@@ -153,6 +162,7 @@ class LanguageTableEnvironmentManager:
         self._init_text_obs = text_obs
         self._last_text_obs = text_obs
         self._last_infos = infos
+        self._task_strings = self._extract_task_strings(obs_list)
 
         observations = {
             "text": text_obs,
@@ -188,6 +198,7 @@ class LanguageTableEnvironmentManager:
         text_obs = batch_state_to_text(obs_list)
         self._last_text_obs = text_obs
         self._last_infos = infos
+        self._task_strings = self._extract_task_strings(obs_list)
 
         observations = {
             "text": text_obs,
@@ -394,6 +405,7 @@ class LanguageTableEnvironmentManager:
                 traj_idx=self.curr_traj_idx,
                 turn_idx=self.curr_turn_idx,
                 instruction=goal_strings[i],
+                task=self._task_strings[i],
             )
             info["language_instruction"] = goal_strings[i]
 
