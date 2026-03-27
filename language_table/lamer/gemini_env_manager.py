@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from .frame_annotator import annotate_frames
-from .state_to_text import batch_state_to_text
+from .state_to_text import batch_state_to_text, _decode_instruction
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +79,19 @@ class LanguageTableEnvironmentManager:
 
         # Per-env disturbance strings: None until first attempt generates them
         self._disturbances: List[Optional[str]] = [None] * self.num_processes
+        self._task_strings: List[str] = [""] * self.num_processes
 
     # ------------------------------------------------------------------
     # Core interface
     # ------------------------------------------------------------------
+
+    def _extract_task_strings(self, obs_list):
+        """Decode the environment task instruction from each observation."""
+        tasks = []
+        for obs in obs_list:
+            instr = obs.get("instruction")
+            tasks.append(_decode_instruction(instr) if instr is not None else "")
+        return tasks
 
     def _extract_images(self, obs_list):
         if self._include_rgb and obs_list and "rgb" in obs_list[0]:
@@ -103,6 +112,7 @@ class LanguageTableEnvironmentManager:
         self._init_text_obs = text_obs
         self._last_text_obs = text_obs
         self._last_infos = infos
+        self._task_strings = self._extract_task_strings(obs_list)
 
         observations = {
             "text": text_obs,
@@ -132,6 +142,7 @@ class LanguageTableEnvironmentManager:
         text_obs = batch_state_to_text(obs_list)
         self._last_text_obs = text_obs
         self._last_infos = infos
+        self._task_strings = self._extract_task_strings(obs_list)
 
         observations = {
             "text": text_obs,
@@ -320,6 +331,7 @@ class LanguageTableEnvironmentManager:
                 traj_idx=self.curr_traj_idx,
                 turn_idx=self.curr_turn_idx,
                 instruction=goal_strings[i],
+                task=self._task_strings[i],
             )
 
         self.curr_turn_idx += 1
