@@ -30,6 +30,7 @@ INSTRUCTION = "push the blue cube to the left of the yellow star"
 FONT_SIZE = 14
 BG_ALPHA = 0.55
 TASK = "sort the red cube in the top left corner and the green star in the bottom right corner"
+REWARD = 50.0
 
 DEFAULT_INPUT = (
     "/gpfs/home/memmelma/projects/LaMer/wandb/run-20260325_111550-akwob79t"
@@ -73,6 +74,7 @@ def main():
     parser.add_argument("--font-size", type=int, default=FONT_SIZE, help="Font size in pixels")
     parser.add_argument("--bg-alpha", type=float, default=BG_ALPHA, help="Background opacity (0-1)")
     parser.add_argument("--task", default=TASK, help="Task text")
+    parser.add_argument("--reward", type=float, default=REWARD, help="Current reward value")
     args = parser.parse_args()
 
     if args.output is None:
@@ -94,6 +96,7 @@ def main():
             font_size=args.font_size,
             bg_alpha=args.bg_alpha,
             task=args.task,
+            reward=args.reward,
         )
         for f in frames
     ]

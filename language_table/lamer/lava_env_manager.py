@@ -63,6 +63,7 @@ class LanguageTableEnvironmentManager:
         include_rgb=False,
         split="train",
         frame_subsample=5,
+        n_steps=1,
     ):
         self.envs = envs
         self.num_processes = envs.num_processes
@@ -75,6 +76,7 @@ class LanguageTableEnvironmentManager:
         self._include_rgb = include_rgb
         self.split = split
         self._frame_subsample = max(1, frame_subsample)
+        self.n_steps = n_steps
 
         # Action space bounds (Language Table uses [-0.1, 0.1]^2)
         self._action_low = -0.1
@@ -232,6 +234,7 @@ class LanguageTableEnvironmentManager:
         success = defaultdict(list)
         for bs in range(batch_size):
             wons = [False for _ in range(self.num_attempts)]
+            best_reward = 0.0
             for i in reversed(range(len(total_batch_list[bs]))):
                 batch_item = total_batch_list[bs][i]
                 if batch_item["active_masks"]:
@@ -239,11 +242,17 @@ class LanguageTableEnvironmentManager:
                     traj_idx = batch_item["traj_idx"]
                     if batch_item["phase"] == "play":
                         wons[traj_idx] = wons[traj_idx] or info.get("won", False)
+                        best_reward = max(best_reward,
+                                          info.get("total_reward", 0.0))
 
             _won = False
             for traj_idx, won in enumerate(wons):
                 _won = _won or won
                 success[f"success_rate[{traj_idx}]"].append(_won)
+
+            if self.n_steps > 1:
+                completion = min(best_reward / 100.0, 1.0)
+                success["partial_completion"].append(completion)
 
         return {key: np.array(value) for key, value in success.items()}
 
@@ -377,13 +386,13 @@ class LanguageTableEnvironmentManager:
                 break
 
         timed_out = active_mask.copy()
-        if timed_out.any():
-            logger.info(
-                "Language Table inner loop timed out after %d steps: "
-                "envs=%s (these did NOT win)",
-                self.max_inner_steps,
-                np.flatnonzero(timed_out).tolist(),
-            )
+        # if timed_out.any():
+        #     logger.info(
+        #         "Language Table inner loop timed out after %d steps: "
+        #         "envs=%s (these did NOT win)",
+        #         self.max_inner_steps,
+        #         np.flatnonzero(timed_out).tolist(),
+        #     )
 
         final_obs = last_obs if last_obs is not None else [{}] * batch
         text_obs = batch_state_to_text(final_obs)
@@ -400,12 +409,14 @@ class LanguageTableEnvironmentManager:
         for i, info in enumerate(last_infos):
             info["is_action_valid"] = np.array(1.0)
             info["won"] = bool(final_dones[i])
+            info["total_reward"] = float(total_rewards[i])
             info["frames"] = annotate_frames(
                 all_frames[i],
                 traj_idx=self.curr_traj_idx,
                 turn_idx=self.curr_turn_idx,
                 instruction=goal_strings[i],
                 task=self._task_strings[i],
+                reward=float(total_rewards[i]),
             )
             info["language_instruction"] = goal_strings[i]
 

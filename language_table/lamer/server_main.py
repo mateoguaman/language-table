@@ -30,18 +30,10 @@ from language_table.environments.rewards.block2relativelocation import BlockToRe
 from language_table.environments.rewards.block2block_relative_location import BlockToBlockRelativeLocationReward
 from language_table.environments.rewards.point2block import PointToBlockReward
 from language_table.environments.rewards.separate_blocks import SeparateBlocksReward
-from language_table.environments.rewards.sort_colors_to_corners import SortColorsToCornersFixedReward
-from language_table.environments.rewards.sort_colors_to_corners import SortColorsToCornersReward
-from language_table.environments.rewards.sort_colors_to_corners import SortColorsToCornersPartialReward
-from language_table.environments.rewards.sort_colors_to_corners import (
-    make_sort_colors_configurable_reward,
-    CORNER_NAMES,
-    SORT_TRAIN_COLORS,
-    SORT_VAL_COLORS,
+from language_table.environments.rewards.multistep_block_to_location import (
+    make_multistep_reward,
 )
 from language_table.environments.rewards.composite import CompositeReward
-from language_table.environments import blocks as blocks_module
-from language_table.environments.blocks import LanguageTableBlockVariants
 
 REWARD_TYPES = {
     "composite": CompositeReward,
@@ -51,9 +43,7 @@ REWARD_TYPES = {
     "block2block_relative_location": BlockToBlockRelativeLocationReward,
     "point2block": PointToBlockReward,
     "separate_blocks": SeparateBlocksReward,
-    "sort_colors_fixed": SortColorsToCornersFixedReward,
-    "sort_colors": SortColorsToCornersReward,
-    "sort_colors_partial_reward": SortColorsToCornersPartialReward,
+    "multistep": None,
     "none": None,
 }
 
@@ -119,6 +109,7 @@ def _create_manager(envs, args, vla_policy, split, group_n):
     else:
         from .lava_env_manager import LanguageTableEnvironmentManager
 
+        n_steps = getattr(args, 'task_n_steps', 1)
         return LanguageTableEnvironmentManager(
             envs=envs,
             num_attempts=args.num_attempts,
@@ -128,6 +119,7 @@ def _create_manager(envs, args, vla_policy, split, group_n):
             vla_policy=vla_policy,
             include_rgb=args.include_rgb,
             split=split,
+            n_steps=n_steps,
         )
 
 
@@ -140,51 +132,22 @@ def _run_single(args):
 
     if args.no_reward:
         reward_factory_cls = None
-    elif args.reward_type == "sort_colors_partial_reward":
-        has_task_args = (args.task_locations or args.task_colors
-                         or args.task_objects)
-        if has_task_args:
-            locations = (args.task_locations.split(",")
-                         if args.task_locations else None)
-            colors = (args.task_colors.split(",")
-                      if args.task_colors else None)
-            base_mode = "BLOCK_8" if args.task_blocks == 8 else "BLOCK_4"
+    elif args.reward_type == "multistep":
+        locations = (args.task_locations.split(",")
+                     if args.task_locations else None)
+        colors = (args.task_colors.split(",")
+                  if args.task_colors else None)
+        shapes = (args.task_shapes.split(",")
+                  if args.task_shapes else None)
+        n_steps = args.task_n_steps
 
-            if args.task_objects:
-                target_objects = args.task_objects.split(",")
-                target_colors = set(o.split("_")[0] for o in target_objects)
-                base_blocks = blocks_module.get_block_set(
-                    LanguageTableBlockVariants(base_mode))
-                distractors = [b for b in base_blocks
-                               if b.split("_")[0] not in target_colors]
-                all_blocks = list(target_objects) + distractors
-                blocks_module.set_custom_blocks(all_blocks)
-                block_mode = "CUSTOM"
-                logger.info(
-                    "Custom block set: targets=%s distractors=%s",
-                    target_objects, distractors)
-            else:
-                block_mode = base_mode
-
-            reward_factory_cls = make_sort_colors_configurable_reward(
-                locations, colors)
-            logger.info(
-                "Configurable sort-colors: locations=%s colors=%s "
-                "block_mode=%s",
-                locations, colors, block_mode)
-        else:
-            block_mode = "BLOCK_4"
-            if args.split == "train":
-                colors = SORT_TRAIN_COLORS
-            else:
-                colors = SORT_VAL_COLORS
-            locations = list(CORNER_NAMES)
-            reward_factory_cls = make_sort_colors_configurable_reward(
-                locations, colors)
-            logger.info(
-                "Sort-colors defaults: split=%s colors=%s locations=%s "
-                "block_mode=%s",
-                args.split, colors, locations, block_mode)
+        reward_factory_cls = make_multistep_reward(
+            locations=locations, shapes=shapes, colors=colors,
+            n_steps=n_steps)
+        logger.info(
+            "Multistep reward: locations=%s shapes=%s colors=%s "
+            "n_steps=%d block_mode=%s",
+            locations, shapes, colors, n_steps, block_mode)
     else:
         reward_factory_cls = REWARD_TYPES[args.reward_type]
 
@@ -220,9 +183,27 @@ def _run_unified(args):
     from .server import MultiPoolEnvServer
 
     if args.no_reward:
-        reward_factory_cls = None
+        train_reward_cls = None
+        val_reward_cls = None
+    elif args.reward_type == "multistep":
+        locations = (args.task_locations.split(",")
+                     if args.task_locations else None)
+        colors = (args.task_colors.split(",")
+                  if args.task_colors else None)
+        shapes = (args.task_shapes.split(",")
+                  if args.task_shapes else None)
+        n_steps = args.task_n_steps
+
+        train_reward_cls = make_multistep_reward(
+            locations=locations, shapes=shapes, colors=colors,
+            n_steps=n_steps)
+        val_reward_cls = train_reward_cls
+        logger.info(
+            "Multistep reward (unified): locations=%s shapes=%s colors=%s "
+            "n_steps=%d", locations, shapes, colors, n_steps)
     else:
-        reward_factory_cls = REWARD_TYPES[args.reward_type]
+        train_reward_cls = REWARD_TYPES[args.reward_type]
+        val_reward_cls = REWARD_TYPES[args.reward_type]
 
     render_obs = not args.no_render or args.vla_checkpoint is not None
 
@@ -242,7 +223,7 @@ def _run_unified(args):
         num_envs=args.train_num_envs,
         group_n=args.train_group_n,
         block_mode=args.block_mode,
-        reward_factory_cls=reward_factory_cls,
+        reward_factory_cls=train_reward_cls,
         seed=args.seed,
         render_obs=render_obs,
         return_full_state=not args.no_full_state,
@@ -259,7 +240,7 @@ def _run_unified(args):
         num_envs=args.val_num_envs,
         group_n=args.val_group_n,
         block_mode=args.block_mode,
-        reward_factory_cls=reward_factory_cls,
+        reward_factory_cls=val_reward_cls,
         seed=val_seed,
         render_obs=render_obs,
         return_full_state=not args.no_full_state,
@@ -319,16 +300,15 @@ def main():
                         choices=["lava", "gemini"])
     parser.add_argument("--gemini_timeout", type=float, default=30.0)
 
-    # sort_colors_partial_reward task overrides
+    # Multistep reward task configuration
     parser.add_argument("--task_locations", type=str, default=None,
-                        help="Comma-separated corner names for sort-colors reward")
+                        help="Comma-separated location names from ABSOLUTE_LOCATIONS")
     parser.add_argument("--task_colors", type=str, default=None,
-                        help="Comma-separated color names for sort-colors reward")
-    parser.add_argument("--task_objects", type=str, default=None,
-                        help="Comma-separated object names (e.g. red_moon,blue_cube)")
-    parser.add_argument("--task_blocks", type=int, default=4,
-                        choices=[4, 8],
-                        help="Number of blocks for sort-colors (4 or 8)")
+                        help="Comma-separated color names (blocks described by color)")
+    parser.add_argument("--task_shapes", type=str, default=None,
+                        help="Comma-separated shape names (blocks described by shape)")
+    parser.add_argument("--task_n_steps", type=int, default=2,
+                        help="Number of block-to-location sub-goals per episode")
 
     # Single-pool mode args
     parser.add_argument("--port", type=int, default=50051)

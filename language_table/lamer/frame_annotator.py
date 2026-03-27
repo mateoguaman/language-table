@@ -32,6 +32,7 @@ def annotate_frame(
     turn_idx: int,
     instruction: str,
     task: Optional[str] = None,
+    reward: Optional[float] = None,
     font_size: int = 14,
     padding: int = 4,
     bg_alpha: float = 0.55,
@@ -51,8 +52,10 @@ def annotate_frame(
     char_width = font.getlength("A") if hasattr(font, "getlength") else font_size * 0.6
     max_chars = max(10, int((img.width - 2 * padding) / char_width))
 
-    # --- top banner: trial / step / instruction ---
+    # --- top banner: trial / step / reward / instruction ---
     line1 = f"Trial {traj_idx} | Step {turn_idx}"
+    if reward is not None:
+        line1 += f" | Reward {reward:.1f}"
     wrapped = textwrap.fill(instruction, width=max_chars)
     text = f"{line1}\n{wrapped}"
 
@@ -95,13 +98,14 @@ def annotate_frames(
     turn_idx: int,
     instruction: str,
     task: Optional[str] = None,
+    reward: Optional[float] = None,
     font_size: int = 14,
 ) -> List[np.ndarray]:
     """Annotate every frame in a list (returns new list, originals untouched)."""
     return [
         annotate_frame(
             f, traj_idx, turn_idx, instruction,
-            task=task, font_size=font_size,
+            task=task, reward=reward, font_size=font_size,
         )
         for f in frames
     ]
