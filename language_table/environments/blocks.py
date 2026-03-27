@@ -28,6 +28,7 @@ class LanguageTableBlockVariants(enum.Enum):
   BLOCK_4_WPOLE = 'BLOCK_4_WPOLE'  # original 4 blocks with purple pole as goal
   BLOCK_8_WPOLE = 'BLOCK_8_WPOLE'  # 8 blocks with purple pole as goal
   N_CHOOSE_K = 'N_CHOOSE_K'  # Combinatorial.
+  CUSTOM = 'CUSTOM'  # User-defined block set via set_custom_blocks().
 
 
 BLOCK_VARIANTS = [i.value for i in LanguageTableBlockVariants]
@@ -50,6 +51,11 @@ def get_all_block_subsets(mode, training):
     return [FIXED_4_COMBINATION_WPOLE]
   elif mode == LanguageTableBlockVariants.BLOCK_8_WPOLE:
     return [FIXED_8_COMBINATION_WPOLE]
+  elif mode == LanguageTableBlockVariants.CUSTOM:
+    if _custom_block_set is None:
+      raise ValueError(
+          'CUSTOM block mode requires set_custom_blocks() to be called first')
+    return [_custom_block_set]
   else:
     raise ValueError('Unsupported block mode')
 
@@ -64,6 +70,11 @@ def get_block_set(mode):
     return FIXED_8_COMBINATION
   elif mode == LanguageTableBlockVariants.N_CHOOSE_K:
     return ALL_BLOCKS
+  elif mode == LanguageTableBlockVariants.CUSTOM:
+    if _custom_block_set is None:
+      raise ValueError(
+          'CUSTOM block mode requires set_custom_blocks() to be called first')
+    return _custom_block_set
   else:
     raise ValueError('Unsupported block mode')
 
@@ -158,3 +169,14 @@ FIXED_4_COMBINATION_WPOLE = ('red_moon', 'blue_cube', 'green_star',
                              'yellow_pentagon', 'purple_pole')
 # 1-block debugging environment.
 FIXED_1_COMBINATION = ['green_star']
+
+# ---------------------------------------------------------------------------
+# CUSTOM block mode: user-defined block set
+# ---------------------------------------------------------------------------
+_custom_block_set = None
+
+
+def set_custom_blocks(blocks):
+  """Register a custom block set for the CUSTOM block mode."""
+  global _custom_block_set
+  _custom_block_set = tuple(blocks)

@@ -18,7 +18,15 @@ from language_table.environments.rewards.separate_blocks import SeparateBlocksRe
 from language_table.environments.rewards.sort_colors_to_corners import SortColorsToCornersFixedReward
 from language_table.environments.rewards.sort_colors_to_corners import SortColorsToCornersReward
 from language_table.environments.rewards.sort_colors_to_corners import SortColorsToCornersPartialReward
+from language_table.environments.rewards.sort_colors_to_corners import (
+    make_sort_colors_configurable_reward,
+    CORNER_NAMES,
+    SORT_TRAIN_COLORS,
+    SORT_VAL_COLORS,
+)
 from language_table.environments.rewards.composite import CompositeReward
+from language_table.environments import blocks as blocks_module
+from language_table.environments.blocks import LanguageTableBlockVariants
 
 REWARD_TYPES = {
     "composite": CompositeReward,
@@ -83,6 +91,21 @@ def main():
                         choices=["train", "val"],
                         help="Perturbation split: 'train' uses the 80%% subset, "
                              "'val' uses the held-out 20%% subset.")
+    parser.add_argument("--task_locations", type=str, default=None,
+                        help="Comma-separated target locations from: top_left, top, "
+                             "top_right, center_left, center, center_right, "
+                             "bottom_left, bottom, bottom_right")
+    parser.add_argument("--task_colors", type=str, default=None,
+                        help="Comma-separated colors to sort (e.g. 'red,blue'). "
+                             "Other colors remain as distractors.")
+    parser.add_argument("--task_objects", type=str, default=None,
+                        help="Comma-separated target block IDs. Distractor blocks "
+                             "are auto-filled from the base block set for "
+                             "non-target colors.")
+    parser.add_argument("--task_blocks", type=int, default=None, choices=[4, 8],
+                        help="Base block count: 4 (BLOCK_4) or 8 (BLOCK_8). "
+                             "Determines distractor blocks when --task_objects "
+                             "is given.")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -102,8 +125,55 @@ def main():
     from .envs import LanguageTableMultiProcessEnv
     from .server import EnvServer
 
+    block_mode = args.block_mode
+
     if args.no_reward:
         reward_factory_cls = None
+    elif args.reward_type == "sort_colors_partial_reward":
+        has_task_args = (args.task_locations or args.task_colors
+                         or args.task_objects)
+        if has_task_args:
+            locations = (args.task_locations.split(",")
+                         if args.task_locations else None)
+            colors = (args.task_colors.split(",")
+                      if args.task_colors else None)
+            base_mode = "BLOCK_8" if args.task_blocks == 8 else "BLOCK_4"
+
+            if args.task_objects:
+                target_objects = args.task_objects.split(",")
+                target_colors = set(o.split("_")[0] for o in target_objects)
+                base_blocks = blocks_module.get_block_set(
+                    LanguageTableBlockVariants(base_mode))
+                distractors = [b for b in base_blocks
+                               if b.split("_")[0] not in target_colors]
+                all_blocks = list(target_objects) + distractors
+                blocks_module.set_custom_blocks(all_blocks)
+                block_mode = "CUSTOM"
+                logger.info(
+                    "Custom block set: targets=%s distractors=%s",
+                    target_objects, distractors)
+            else:
+                block_mode = base_mode
+
+            reward_factory_cls = make_sort_colors_configurable_reward(
+                locations, colors)
+            logger.info(
+                "Configurable sort-colors: locations=%s colors=%s "
+                "block_mode=%s",
+                locations, colors, block_mode)
+        else:
+            block_mode = "BLOCK_4"
+            if args.split == "train":
+                colors = SORT_TRAIN_COLORS
+            else:
+                colors = SORT_VAL_COLORS
+            locations = list(CORNER_NAMES)
+            reward_factory_cls = make_sort_colors_configurable_reward(
+                locations, colors)
+            logger.info(
+                "Sort-colors defaults: split=%s colors=%s locations=%s "
+                "block_mode=%s",
+                args.split, colors, locations, block_mode)
     else:
         reward_factory_cls = REWARD_TYPES[args.reward_type]
 
@@ -112,7 +182,7 @@ def main():
 
     envs = LanguageTableMultiProcessEnv(
         num_envs=args.num_envs,
-        block_mode=args.block_mode,
+        block_mode=block_mode,
         reward_factory_cls=reward_factory_cls,
         seed=args.seed,
         group_n=args.group_n,

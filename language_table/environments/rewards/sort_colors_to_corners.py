@@ -13,20 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Reward for sorting blocks by color into the four table corners.
+"""Reward for sorting blocks by color into table locations.
 
 V1 (SortColorsToCornersFixedReward): fixed color-to-corner mapping.
 V2 (SortColorsToCornersReward): randomised mapping stated in the instruction.
+V3 (SortColorsToCornersPartialReward): V2 with one-shot per-block reward.
+V4 (make_sort_colors_configurable_reward): factory for configurable
+    locations (all 9 absolute), colors, and distractor support.
 """
 
 import collections
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from absl import logging
 from language_table.environments import blocks as blocks_module
 from language_table.environments.rewards import reward as base_reward
 from language_table.environments.rewards import synonyms
 from language_table.environments.rewards import task_info
+from language_table.environments.rewards.block2absolutelocation import (
+    ABSOLUTE_LOCATIONS,
+    LOCATION_SYNONYMS as ABS_LOCATION_SYNONYMS,
+)
 import numpy as np
 
 # ---------------------------------------------------------------------------
@@ -345,3 +352,119 @@ class SortColorsToCornersPartialReward(SortColorsToCornersReward):
             self._in_reward_zone_steps = 0
 
         return reward, done
+
+
+# ===================================================================
+# V4 – Configurable locations / colors with distractor support
+# ===================================================================
+
+ALL_LOCATION_NAMES = list(ABSOLUTE_LOCATIONS.keys())
+
+# Hardcoded train/val color splits (assertion targets for BLOCK_4)
+SORT_TRAIN_COLORS = ['red', 'blue']
+SORT_VAL_COLORS = ['green', 'yellow']
+
+SORT_TRAIN_TARGETS_4 = [
+    b for b in blocks_module.FIXED_4_COMBINATION
+    if b.split('_')[0] in SORT_TRAIN_COLORS
+]
+SORT_VAL_TARGETS_4 = [
+    b for b in blocks_module.FIXED_4_COMBINATION
+    if b.split('_')[0] in SORT_VAL_COLORS
+]
+
+assert all(b in blocks_module.FIXED_4_COMBINATION for b in SORT_TRAIN_TARGETS_4), \
+    f"Train targets {SORT_TRAIN_TARGETS_4} not in BLOCK_4 {blocks_module.FIXED_4_COMBINATION}"
+assert all(b in blocks_module.FIXED_4_COMBINATION for b in SORT_VAL_TARGETS_4), \
+    f"Val targets {SORT_VAL_TARGETS_4} not in BLOCK_4 {blocks_module.FIXED_4_COMBINATION}"
+
+
+def _build_block_to_target_abs(color_to_location, color_groups):
+    """Map block ids to target coordinates using ABSOLUTE_LOCATIONS."""
+    block_to_target = {}
+    for color, loc_name in color_to_location.items():
+        if color not in color_groups:
+            continue
+        target = np.array(ABSOLUTE_LOCATIONS[loc_name])
+        for block in color_groups[color]:
+            block_to_target[block] = np.copy(target)
+    return block_to_target
+
+
+def _build_configurable_instruction(color_to_location, rng):
+    """Build an instruction using the full ABSOLUTE_LOCATIONS synonym set."""
+    verb = rng.choice(INSTRUCTION_VERBS)
+    clauses = []
+    for color in sorted(color_to_location):
+        loc = color_to_location[color]
+        loc_text = rng.choice(ABS_LOCATION_SYNONYMS[loc])
+        clauses.append(f'{color} blocks to the {loc_text}')
+    if len(clauses) <= 2:
+        body = ' and '.join(clauses)
+    else:
+        body = ', '.join(clauses[:-1]) + ', and ' + clauses[-1]
+    return f'{verb} {body}'
+
+
+def make_sort_colors_configurable_reward(locations=None, colors=None):
+    """Factory returning a reward class configured for specific locations/colors.
+
+    Parameters
+    ----------
+    locations : list[str] | None
+        Pool of location names from ABSOLUTE_LOCATIONS. Each reset shuffles
+        this pool and assigns one location per target color. Defaults to all 9.
+    colors : list[str] | None
+        Which colors to sort. Blocks of other colors on the table are
+        distractors (ignored by the reward). Defaults to all 4 colors.
+
+    Returns
+    -------
+    type
+        A reward class (not an instance) compatible with the LanguageTable
+        reward_factory interface.
+    """
+    _locations = list(locations) if locations else list(ALL_LOCATION_NAMES)
+    _colors: Set[str] = set(colors) if colors else set(ALL_COLORS)
+
+    class SortColorsConfigurablePartialReward(SortColorsToCornersPartialReward):
+
+        def reset(self, state, blocks_on_table):
+            color_groups = _group_blocks_by_color(blocks_on_table)
+            colors_present = sorted(c for c in color_groups if c in _colors)
+            if len(colors_present) < 2:
+                return task_info.FAILURE
+
+            locs = list(_locations)
+            self._rng.shuffle(locs)
+            color_to_location = {
+                color: locs[i] for i, color in enumerate(colors_present)
+            }
+
+            target_groups = {c: color_groups[c] for c in colors_present}
+            block_to_target = _build_block_to_target_abs(
+                color_to_location, target_groups)
+            if _any_block_already_in_place(
+                    state, block_to_target, self._get_translation_for_block):
+                return task_info.FAILURE
+            return self.reset_to(state, color_to_location, blocks_on_table)
+
+        def reset_to(self, state, color_to_location, blocks_on_table):
+            self._rewarded_blocks = set()
+            self._color_to_corner = dict(color_to_location)
+            color_groups = _group_blocks_by_color(blocks_on_table)
+            target_groups = {
+                c: color_groups[c]
+                for c in self._color_to_corner if c in color_groups
+            }
+            self._block_to_target = _build_block_to_target_abs(
+                self._color_to_corner, target_groups)
+            self._instruction = self._sample_instruction()
+            self._in_reward_zone_steps = 0
+            return self.get_current_task_info(state)
+
+        def _sample_instruction(self):
+            return _build_configurable_instruction(
+                self._color_to_corner, self._rng)
+
+    return SortColorsConfigurablePartialReward
