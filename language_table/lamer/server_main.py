@@ -319,6 +319,17 @@ def main():
                         choices=["lava", "gemini"])
     parser.add_argument("--gemini_timeout", type=float, default=30.0)
 
+    # sort_colors_partial_reward task overrides
+    parser.add_argument("--task_locations", type=str, default=None,
+                        help="Comma-separated corner names for sort-colors reward")
+    parser.add_argument("--task_colors", type=str, default=None,
+                        help="Comma-separated color names for sort-colors reward")
+    parser.add_argument("--task_objects", type=str, default=None,
+                        help="Comma-separated object names (e.g. red_moon,blue_cube)")
+    parser.add_argument("--task_blocks", type=int, default=4,
+                        choices=[4, 8],
+                        help="Number of blocks for sort-colors (4 or 8)")
+
     # Single-pool mode args
     parser.add_argument("--port", type=int, default=50051)
     parser.add_argument("--num_envs", type=int, default=8)
