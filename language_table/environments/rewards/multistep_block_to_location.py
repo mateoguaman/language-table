@@ -4,9 +4,9 @@ On each reset(), the reward samples n_steps distinct (block, location) pairs.
 Blocks are referenced in the instruction by shape only, color only, or both,
 depending on which of shapes/colors is set (None = omit from instruction).
 
-Partial reward: goal_reward / n_steps per block when it first reaches its
-target.  done=True only when ALL blocks are simultaneously in their target
-locations (after delay_reward_steps).
+Sparse reward: 0 until all n_steps blocks are simultaneously within threshold
+of their targets for delay_reward_steps consecutive steps; then goal_reward is
+emitted once and done=True (same as SortColorsToCornersReward).
 """
 
 from typing import List, Optional, Set
@@ -17,8 +17,7 @@ from language_table.environments.rewards.block2absolutelocation import (
     LOCATION_SYNONYMS,
 )
 from language_table.environments.rewards.sort_colors_to_corners import (
-    CORNER_DISTANCE_THRESHOLD,
-    SortColorsToCornersPartialReward,
+    SortColorsToCornersReward,
     _any_block_already_in_place,
 )
 from language_table.environments.rewards.synonyms import (
@@ -108,7 +107,7 @@ def make_multistep_reward(
     else:
         _describe_by = 'full'
 
-    class MultiStepBlockToLocationReward(SortColorsToCornersPartialReward):
+    class MultiStepBlockToLocationReward(SortColorsToCornersReward):
 
         def reset(self, state, blocks_on_table):
             if _shapes is not None:
@@ -147,7 +146,6 @@ def make_multistep_reward(
 
         def _reset_to_multistep(self, state, block_to_target,
                                 block_to_loc_name, blocks_on_table):
-            self._rewarded_blocks = set()
             self._block_to_target = dict(block_to_target)
             self._color_to_corner = dict(block_to_loc_name)
             self._instruction = _build_multistep_instruction(
