@@ -147,7 +147,6 @@ def make_multistep_reward(
 
         def _reset_to_multistep(self, state, block_to_target,
                                 block_to_loc_name, blocks_on_table):
-            self._rewarded_blocks = set()
             self._block_to_target = dict(block_to_target)
             self._color_to_corner = dict(block_to_loc_name)
             self._instruction = _build_multistep_instruction(

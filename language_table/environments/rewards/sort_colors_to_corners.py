@@ -17,7 +17,7 @@
 
 V1 (SortColorsToCornersFixedReward): fixed color-to-corner mapping.
 V2 (SortColorsToCornersReward): randomised mapping stated in the instruction.
-V3 (SortColorsToCornersPartialReward): V2 with one-shot per-block reward.
+V3 (SortColorsToCornersPartialReward): V2 with snapshot-based partial reward.
 """
 
 import collections
@@ -298,41 +298,33 @@ class SortColorsToCornersReward(SortColorsToCornersFixedReward):
 
 
 # ===================================================================
-# V3 – Dynamic mapping with one-shot per-block reward
+# V3 – Dynamic mapping with snapshot-based partial reward
 # ===================================================================
 
 class SortColorsToCornersPartialReward(SortColorsToCornersReward):
-    """Like V2 but awards goal_reward/n_blocks once per newly placed block.
+    """Like V2 but with snapshot-based partial reward.
 
-    Each block triggers a one-time reward of goal_reward/n_blocks when it
-    first enters its target corner.  Blocks that leave and re-enter are
-    NOT rewarded again (prevents accumulation across inner steps).
+    At every timestep the reward equals
+    ``(blocks currently in target) / n_blocks * goal_reward``.
+    If a block is moved away from its target the reward drops accordingly.
     done=True only fires when ALL blocks are currently in their corners
     (after delay_reward_steps consecutive qualifying steps).
     """
-
-    def reset_to(self, state, color_to_corner, blocks_on_table):
-        self._rewarded_blocks = set()
-        return super().reset_to(state, color_to_corner, blocks_on_table)
 
     def reward_for(self, state, block_to_target):
         n_blocks = len(block_to_target)
         per_block_reward = self._goal_reward / n_blocks
 
-        currently_placed = set()
-        newly_rewarded = 0
+        currently_placed = 0
         for block, target in block_to_target.items():
             pos = np.array(self._get_translation_for_block(block, state))
             if np.linalg.norm(pos - target) < CORNER_DISTANCE_THRESHOLD:
-                currently_placed.add(block)
-                if block not in self._rewarded_blocks:
-                    self._rewarded_blocks.add(block)
-                    newly_rewarded += 1
+                currently_placed += 1
 
-        reward = newly_rewarded * per_block_reward
+        reward = currently_placed * per_block_reward
         done = False
 
-        if len(currently_placed) == n_blocks:
+        if currently_placed == n_blocks:
             if self._in_reward_zone_steps >= self._delay_reward_steps:
                 done = True
             else:

@@ -95,7 +95,6 @@ class LanguageTableEnvironmentManager:
         self._last_obs_list: List[Dict] = [{} for _ in range(self.num_processes)]
         self._last_goal_strings: List[str] = [""] * self.num_processes
         self._task_strings: List[str] = [""] * self.num_processes
-        self._cumulative_rewards = np.zeros(self.num_processes, dtype=np.float32)
 
     def _log_step_failure(
         self,
@@ -156,7 +155,6 @@ class LanguageTableEnvironmentManager:
         self.curr_traj_idx = 0
         self.curr_turn_idx = 0
         self.reflections = [{} for _ in range(self.num_processes)]
-        self._cumulative_rewards = np.zeros(self.num_processes, dtype=np.float32)
 
         if self.vla is not None:
             self.vla.reset(num_envs=self.num_processes)
@@ -194,7 +192,6 @@ class LanguageTableEnvironmentManager:
 
         self.curr_traj_idx += 1 if self.do_reflection else 0
         self.curr_turn_idx = 0
-        self._cumulative_rewards = np.zeros(self.num_processes, dtype=np.float32)
 
         if self.vla is not None:
             self.vla.reset(num_envs=self.num_processes)
@@ -288,7 +285,7 @@ class LanguageTableEnvironmentManager:
 
         batch = self.num_processes
         active_mask = np.ones(batch, dtype=bool)
-        total_rewards = np.zeros(batch, dtype=np.float32)
+        last_rewards = np.zeros(batch, dtype=np.float32)
         final_dones = np.zeros(batch, dtype=bool)
         last_obs = None
         last_infos = [{} for _ in range(batch)]
@@ -299,7 +296,7 @@ class LanguageTableEnvironmentManager:
         for i in range(batch):
             if "rgb" in self._last_obs_list[i]:
                 all_frames[i].append(self._last_obs_list[i]["rgb"].copy())
-                all_frame_rewards[i].append(float(self._cumulative_rewards[i]))
+                all_frame_rewards[i].append(0.0)
 
         # Seed the VLA with the obs cached from reset()/restart().
         # After the first env.step(), we use its returned obs instead — just
@@ -364,14 +361,15 @@ class LanguageTableEnvironmentManager:
             rewards = np.array(rewards, dtype=np.float32)
             dones = np.array(dones, dtype=bool)
 
-            total_rewards += rewards * active_mask
+            for i in range(batch):
+                if active_mask[i]:
+                    last_rewards[i] = rewards[i]
 
             if (inner_step + 1) % self._frame_subsample == 0:
                 for i in range(batch):
                     if active_mask[i] and "rgb" in obs_list[i]:
                         all_frames[i].append(obs_list[i]["rgb"].copy())
-                        all_frame_rewards[i].append(
-                            float(self._cumulative_rewards[i] + total_rewards[i]))
+                        all_frame_rewards[i].append(float(last_rewards[i]))
 
             newly_done = dones & active_mask
             final_dones |= newly_done
@@ -413,12 +411,10 @@ class LanguageTableEnvironmentManager:
             "anchor": text_obs,
         }
 
-        self._cumulative_rewards += total_rewards
-
         for i, info in enumerate(last_infos):
             info["is_action_valid"] = np.array(1.0)
             info["won"] = bool(final_dones[i])
-            info["total_reward"] = float(self._cumulative_rewards[i])
+            info["total_reward"] = float(last_rewards[i])
             info["frames"] = annotate_frames(
                 all_frames[i],
                 traj_idx=self.curr_traj_idx,
@@ -431,7 +427,7 @@ class LanguageTableEnvironmentManager:
 
         self.curr_turn_idx += 1
 
-        return observations, total_rewards / 100.0, final_dones, last_infos
+        return observations, last_rewards / 100.0, final_dones, last_infos
 
     def _handle_reflect_step(self, text_actions: List[str]):
         """Store reflections from the LLM."""
