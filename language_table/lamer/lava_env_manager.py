@@ -234,7 +234,7 @@ class LanguageTableEnvironmentManager:
         success = defaultdict(list)
         for bs in range(batch_size):
             wons = [False for _ in range(self.num_attempts)]
-            best_reward = 0.0
+            last_reward_per_attempt: Dict[int, float] = {}
             for i in reversed(range(len(total_batch_list[bs]))):
                 batch_item = total_batch_list[bs][i]
                 if batch_item["active_masks"]:
@@ -242,8 +242,11 @@ class LanguageTableEnvironmentManager:
                     traj_idx = batch_item["traj_idx"]
                     if batch_item["phase"] == "play":
                         wons[traj_idx] = wons[traj_idx] or info.get("won", False)
-                        best_reward = max(best_reward,
-                                          info.get("total_reward", 0.0))
+                        if traj_idx not in last_reward_per_attempt:
+                            last_reward_per_attempt[traj_idx] = info.get(
+                                "total_reward", 0.0)
+
+            best_reward = max(last_reward_per_attempt.values()) if last_reward_per_attempt else 0.0
 
             _won = False
             for traj_idx, won in enumerate(wons):
