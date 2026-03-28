@@ -1,7 +1,7 @@
 """Overlay trial / step / instruction text onto RGB frames."""
 
 import textwrap
-from typing import List, Optional
+from typing import List, Optional, Sequence, Union
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -99,9 +99,22 @@ def annotate_frames(
     instruction: str,
     task: Optional[str] = None,
     reward: Optional[float] = None,
+    rewards: Optional[Sequence[float]] = None,
     font_size: int = 14,
 ) -> List[np.ndarray]:
-    """Annotate every frame in a list (returns new list, originals untouched)."""
+    """Annotate every frame in a list (returns new list, originals untouched).
+
+    If *rewards* (a per-frame list) is provided it takes precedence over
+    the scalar *reward*; each frame is stamped with its own cumulative value.
+    """
+    if rewards is not None and len(rewards) == len(frames):
+        return [
+            annotate_frame(
+                f, traj_idx, turn_idx, instruction,
+                task=task, reward=r, font_size=font_size,
+            )
+            for f, r in zip(frames, rewards)
+        ]
     return [
         annotate_frame(
             f, traj_idx, turn_idx, instruction,
