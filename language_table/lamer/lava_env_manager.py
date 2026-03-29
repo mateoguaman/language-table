@@ -9,6 +9,7 @@ Follows the two-loop VLA architecture from pybullet_vla/env_manager.py:
 
 import logging
 import re
+import time
 from collections import defaultdict
 from typing import Any, Dict, List
 
@@ -64,6 +65,8 @@ class LanguageTableEnvironmentManager:
         split="train",
         frame_subsample=5,
         n_steps=1,
+        benchmark_timing=False,
+        benchmark_trace_inner_steps=False,
     ):
         self.envs = envs
         self.num_processes = envs.num_processes
@@ -77,6 +80,8 @@ class LanguageTableEnvironmentManager:
         self.split = split
         self._frame_subsample = max(1, frame_subsample)
         self.n_steps = n_steps
+        self._benchmark_timing = benchmark_timing
+        self._benchmark_trace_inner_steps = benchmark_trace_inner_steps
 
         # Action space bounds (Language Table uses [-0.1, 0.1]^2)
         self._action_low = -0.1
@@ -148,8 +153,19 @@ class LanguageTableEnvironmentManager:
             return [obs["rgb"] for obs in obs_list]
         return None
 
+    def _attach_benchmark_payload(self, infos, payload):
+        """Attach a benchmark payload to the first info dict only."""
+        if not self._benchmark_timing or not infos:
+            return infos
+        first_info = dict(infos[0])
+        first_info["benchmark_env"] = payload
+        infos = list(infos)
+        infos[0] = first_info
+        return infos
+
     def reset(self):
         """Reset all envs and return text observations."""
+        reset_t0 = time.perf_counter()
         obs_list, infos = self.envs.reset()
 
         self.curr_traj_idx = 0
@@ -171,6 +187,16 @@ class LanguageTableEnvironmentManager:
             "image": self._extract_images(obs_list),
             "anchor": text_obs,
         }
+        infos = self._attach_benchmark_payload(
+            infos,
+            {
+                "kind": "env_server_call",
+                "method": "reset",
+                "split": self.split,
+                "server_elapsed_s": float(time.perf_counter() - reset_t0),
+                "num_processes": int(self.num_processes),
+            },
+        )
         return observations, infos
 
     def step(self, text_actions: List[str], phase: str = "play"):
@@ -188,6 +214,7 @@ class LanguageTableEnvironmentManager:
 
     def restart(self):
         """Restart envs for the next meta-RL attempt."""
+        restart_t0 = time.perf_counter()
         obs_list, infos = self.envs.restart()
 
         self.curr_traj_idx += 1 if self.do_reflection else 0
@@ -207,10 +234,21 @@ class LanguageTableEnvironmentManager:
             "image": self._extract_images(obs_list),
             "anchor": text_obs,
         }
+        infos = self._attach_benchmark_payload(
+            infos,
+            {
+                "kind": "env_server_call",
+                "method": "restart",
+                "split": self.split,
+                "server_elapsed_s": float(time.perf_counter() - restart_t0),
+                "num_processes": int(self.num_processes),
+            },
+        )
         return observations, infos
 
     def reflect(self):
         """Return prompts for the reflection phase."""
+        reflect_t0 = time.perf_counter()
         infos = [
             {"action_is_valid": True, "won": False}
             for _ in range(self.num_processes)
@@ -223,6 +261,16 @@ class LanguageTableEnvironmentManager:
             "image": None,
             "anchor": ["reflection"] * self.num_processes,
         }
+        infos = self._attach_benchmark_payload(
+            infos,
+            {
+                "kind": "env_server_call",
+                "method": "reflect",
+                "split": self.split,
+                "server_elapsed_s": float(time.perf_counter() - reflect_t0),
+                "num_processes": int(self.num_processes),
+            },
+        )
         return observations, infos
 
     def success_evaluator(self, **kwargs):
@@ -281,6 +329,7 @@ class LanguageTableEnvironmentManager:
         Otherwise, falls back to random actions.
         """
         
+        play_t0 = time.perf_counter()
         raw_strings = list(goal_strings)
         for i, raw in enumerate(raw_strings):   
             cleaned = clean_string(raw)
@@ -306,13 +355,16 @@ class LanguageTableEnvironmentManager:
         # like the original eval loop: obs = env.reset(); while: action =
         # policy(obs); obs = env.step(action).
         obs_list_for_vla = self._last_obs_list if self.vla is not None else None
+        inner_step_records = []
 
         for inner_step in range(self.max_inner_steps):
+            n_active_before = int(active_mask.sum())
             if self.vla is not None:
                 # Batched VLA inference: the LLM's goal strings condition the
                 # policy, and RGB images from each env are preprocessed and
                 # fed through the LAVA model in a single forward pass.
                 actions = self.vla.predict(goal_strings, obs_list_for_vla, active_mask)
+                vla_stats = self.vla.get_last_predict_stats()
             else:
                 # Random actions fallback (no VLA loaded)
                 if inner_step == 0:
@@ -327,6 +379,19 @@ class LanguageTableEnvironmentManager:
                 for i in range(batch):
                     if not active_mask[i]:
                         actions[i] = np.zeros(2, dtype=np.float32)
+                vla_stats = {
+                    "kind": "vla_predict",
+                    "build_batch_s": 0.0,
+                    "gather_active_rgb_s": 0.0,
+                    "frame_update_s": 0.0,
+                    "token_batch_s": 0.0,
+                    "instruction_to_device_s": 0.0,
+                    "forward_s": 0.0,
+                    "total_s": 0.0,
+                    "n_active": n_active_before,
+                    "batch_size": batch,
+                    "preprocess_mode": "random",
+                }
 
             action_array = np.asarray(actions, dtype=np.float32)
             invalid_action_mask = ~np.isfinite(action_array).all(axis=1)
@@ -355,6 +420,7 @@ class LanguageTableEnvironmentManager:
             except Exception:
                 self._log_step_failure(inner_step, goal_strings, actions, active_mask)
                 raise
+            env_step_stats = self.envs.get_last_step_stats()
 
             # Feed fresh observations back to the VLA for the next iteration,
             # matching the original eval loop: action = policy(obs); obs = env.step(action)
@@ -377,6 +443,25 @@ class LanguageTableEnvironmentManager:
             newly_done = dones & active_mask
             final_dones |= newly_done
             active_mask &= ~dones
+            inner_step_records.append(
+                {
+                    "inner_step": int(inner_step),
+                    "n_active_before": int(n_active_before),
+                    "n_active_after": int(active_mask.sum()),
+                    "n_newly_done": int(newly_done.sum()),
+                    "vla_total_s": float(vla_stats.get("total_s", 0.0)),
+                    "vla_build_batch_s": float(vla_stats.get("build_batch_s", 0.0)),
+                    "vla_gather_active_rgb_s": float(vla_stats.get("gather_active_rgb_s", 0.0)),
+                    "vla_frame_update_s": float(vla_stats.get("frame_update_s", 0.0)),
+                    "vla_token_batch_s": float(vla_stats.get("token_batch_s", 0.0)),
+                    "vla_instruction_to_device_s": float(vla_stats.get("instruction_to_device_s", 0.0)),
+                    "vla_forward_s": float(vla_stats.get("forward_s", 0.0)),
+                    "env_step_total_s": float(env_step_stats.get("total_s", 0.0)),
+                    "ray_dispatch_s": float(env_step_stats.get("dispatch_s", 0.0)),
+                    "ray_collect_s": float(env_step_stats.get("collect_s", 0.0)),
+                    "ray_unpack_s": float(env_step_stats.get("unpack_s", 0.0)),
+                }
+            )
             if newly_done.any():
                 logger.info(
                     "Language Table inner step %d completed envs=%s remaining_active=%d",
@@ -428,12 +513,34 @@ class LanguageTableEnvironmentManager:
             )
             info["language_instruction"] = goal_strings[i]
 
+        benchmark_payload = {
+            "kind": "env_server_play_step",
+            "method": "step",
+            "split": self.split,
+            "server_elapsed_s": float(time.perf_counter() - play_t0),
+            "traj_idx": int(self.curr_traj_idx),
+            "turn_idx": int(self.curr_turn_idx),
+            "max_inner_steps": int(self.max_inner_steps),
+            "inner_steps_completed": int(len(inner_step_records)),
+            "timed_out_envs": int(timed_out.sum()),
+            "n_processes": int(batch),
+            "vla_total_s": float(sum(r["vla_total_s"] for r in inner_step_records)),
+            "env_step_total_s": float(sum(r["env_step_total_s"] for r in inner_step_records)),
+            "ray_dispatch_s": float(sum(r["ray_dispatch_s"] for r in inner_step_records)),
+            "ray_collect_s": float(sum(r["ray_collect_s"] for r in inner_step_records)),
+            "ray_unpack_s": float(sum(r["ray_unpack_s"] for r in inner_step_records)),
+        }
+        if self._benchmark_trace_inner_steps:
+            benchmark_payload["inner_steps"] = inner_step_records
+        last_infos = self._attach_benchmark_payload(last_infos, benchmark_payload)
+
         self.curr_turn_idx += 1
 
         return observations, last_rewards / 100.0, final_dones, last_infos
 
     def _handle_reflect_step(self, text_actions: List[str]):
         """Store reflections from the LLM."""
+        reflect_t0 = time.perf_counter()
         for i, reflection in enumerate(text_actions):
             self.reflections[i][self.curr_traj_idx] = reflection
 
@@ -448,6 +555,16 @@ class LanguageTableEnvironmentManager:
         }
         rewards = np.zeros(self.num_processes, dtype=np.float32)
         dones = np.array([False] * self.num_processes)
+        infos = self._attach_benchmark_payload(
+            infos,
+            {
+                "kind": "env_server_call",
+                "method": "step_reflect",
+                "split": self.split,
+                "server_elapsed_s": float(time.perf_counter() - reflect_t0),
+                "num_processes": int(self.num_processes),
+            },
+        )
         return observations, rewards, dones, infos
 
     # ------------------------------------------------------------------

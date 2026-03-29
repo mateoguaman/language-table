@@ -120,6 +120,8 @@ def _create_manager(envs, args, vla_policy, split, group_n):
             include_rgb=args.include_rgb,
             split=split,
             n_steps=n_steps,
+            benchmark_timing=args.benchmark_timing,
+            benchmark_trace_inner_steps=args.benchmark_trace_inner_steps,
         )
 
 
@@ -299,6 +301,10 @@ def main():
     parser.add_argument("--policy", type=str, default="lava",
                         choices=["lava", "gemini"])
     parser.add_argument("--gemini_timeout", type=float, default=30.0)
+    parser.add_argument("--benchmark_timing", action="store_true",
+                        help="Attach structured timing metadata to env responses.")
+    parser.add_argument("--benchmark_trace_inner_steps", action="store_true",
+                        help="Include per-inner-step timing records in benchmark metadata.")
 
     # Multistep reward task configuration
     parser.add_argument("--task_locations", type=str, default=None,

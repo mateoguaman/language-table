@@ -7,6 +7,7 @@ each Ray actor holds an independent LanguageTable gym.Env instance.
 
 import copy
 import logging
+import time
 
 import ray
 import numpy as np
@@ -244,6 +245,7 @@ class LanguageTableMultiProcessEnv:
         self.env_num = num_envs
         self.num_processes = num_envs * group_n
         self.timeout = timeout
+        self._last_step_stats = {}
 
         np.random.seed(seed)
 
@@ -278,15 +280,32 @@ class LanguageTableMultiProcessEnv:
         """
         assert len(actions) == self.num_processes
 
+        step_t0 = time.perf_counter()
+
         if active_mask is None:
+            dispatch_t0 = time.perf_counter()
             futures = [w.step.remote(a) for w, a in zip(self.workers, actions)]
+            dispatch_s = time.perf_counter() - dispatch_t0
+            collect_t0 = time.perf_counter()
             results = ray.get(futures, timeout=self.timeout)
+            collect_s = time.perf_counter() - collect_t0
+            unpack_t0 = time.perf_counter()
             obs_list, reward_list, done_list, info_list = [], [], [], []
             for obs, reward, done, info in results:
                 obs_list.append(obs)
                 reward_list.append(reward)
                 done_list.append(done)
                 info_list.append(info)
+            unpack_s = time.perf_counter() - unpack_t0
+            self._last_step_stats = {
+                "kind": "ray_env_step",
+                "dispatch_s": float(dispatch_s),
+                "collect_s": float(collect_s),
+                "unpack_s": float(unpack_s),
+                "total_s": float(time.perf_counter() - step_t0),
+                "n_active": int(self.num_processes),
+                "n_total": int(self.num_processes),
+            }
             return obs_list, reward_list, done_list, info_list
 
         active_mask = np.asarray(active_mask, dtype=bool)
@@ -308,10 +327,24 @@ class LanguageTableMultiProcessEnv:
         if not active_indices:
             for idx in range(self.num_processes):
                 info_list[idx]["skipped_step_after_done"] = True
+            self._last_step_stats = {
+                "kind": "ray_env_step",
+                "dispatch_s": 0.0,
+                "collect_s": 0.0,
+                "unpack_s": 0.0,
+                "total_s": float(time.perf_counter() - step_t0),
+                "n_active": 0,
+                "n_total": int(self.num_processes),
+            }
             return obs_list, reward_list, done_list, info_list
 
+        dispatch_t0 = time.perf_counter()
         futures = [self.workers[idx].step.remote(actions[idx]) for idx in active_indices]
+        dispatch_s = time.perf_counter() - dispatch_t0
+        collect_t0 = time.perf_counter()
         results = ray.get(futures, timeout=self.timeout)
+        collect_s = time.perf_counter() - collect_t0
+        unpack_t0 = time.perf_counter()
         for idx, (obs, reward, done, info) in zip(active_indices, results):
             obs_list[idx] = obs
             reward_list[idx] = reward
@@ -321,7 +354,21 @@ class LanguageTableMultiProcessEnv:
         for idx in range(self.num_processes):
             if not active_mask[idx]:
                 info_list[idx]["skipped_step_after_done"] = True
+        unpack_s = time.perf_counter() - unpack_t0
+        self._last_step_stats = {
+            "kind": "ray_env_step",
+            "dispatch_s": float(dispatch_s),
+            "collect_s": float(collect_s),
+            "unpack_s": float(unpack_s),
+            "total_s": float(time.perf_counter() - step_t0),
+            "n_active": int(len(active_indices)),
+            "n_total": int(self.num_processes),
+        }
         return obs_list, reward_list, done_list, info_list
+
+    def get_last_step_stats(self):
+        """Return timing stats for the most recent ``step()`` call."""
+        return dict(self._last_step_stats)
 
     def reset(self):
         """Reset all envs with unique seeds."""

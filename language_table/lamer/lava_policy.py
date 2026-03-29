@@ -16,6 +16,7 @@ Usage:
 """
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 import jax
@@ -242,6 +243,8 @@ class LAVAPolicy:
 
         # Cache for tokenized instructions (instruction_str -> tokens)
         self._token_cache: Dict[str, np.ndarray] = {}
+        self._last_build_batch_stats: Dict[str, float] = {}
+        self._last_predict_stats: Dict[str, float] = {}
 
         # JIT-compile the forward pass
         self._forward_jit = jax.jit(self._forward_fn)
@@ -344,8 +347,10 @@ class LAVAPolicy:
         (N, seq_len, H, W, 3) buffer, so no per-env stacking or
         CPU→GPU transfer is needed for RGB data.
         """
+        batch_t0 = time.perf_counter()
         batch_size = len(goals)
 
+        gather_t0 = time.perf_counter()
         active_indices = []
         active_rgbs = []
         for i in range(batch_size):
@@ -357,9 +362,13 @@ class LAVAPolicy:
                 continue
             active_indices.append(i)
             active_rgbs.append(rgb)
+        gather_s = time.perf_counter() - gather_t0
 
+        frame_update_t0 = time.perf_counter()
         self._update_frame_buffers_batch(active_indices, active_rgbs)
+        frame_update_s = time.perf_counter() - frame_update_t0
 
+        token_batch_t0 = time.perf_counter()
         clip_batch = np.zeros(
             (batch_size, self.sequence_length, 77), dtype=np.int32)
         for i in range(batch_size):
@@ -367,10 +376,26 @@ class LAVAPolicy:
                 continue
             tokens = self._tokenize(goals[i])
             clip_batch[i] = tokens[None]
+        token_batch_s = time.perf_counter() - token_batch_t0
+
+        instruction_to_device_t0 = time.perf_counter()
+        instruction_tokens = jnp.array(clip_batch)
+        instruction_to_device_s = time.perf_counter() - instruction_to_device_t0
+
+        self._last_build_batch_stats = {
+            "gather_active_rgb_s": float(gather_s),
+            "frame_update_s": float(frame_update_s),
+            "token_batch_s": float(token_batch_s),
+            "instruction_to_device_s": float(instruction_to_device_s),
+            "total_s": float(time.perf_counter() - batch_t0),
+            "n_active": int(len(active_indices)),
+            "batch_size": int(batch_size),
+            "preprocess_mode": self.preprocess_mode,
+        }
 
         return {
             "rgb": self._frame_array,
-            "instruction_tokenized_clip": jnp.array(clip_batch),
+            "instruction_tokenized_clip": instruction_tokens,
         }
 
     def predict(
@@ -410,8 +435,11 @@ class LAVAPolicy:
                 empty_goal_indices[:10],
             )
 
+        predict_t0 = time.perf_counter()
+
         # Build batched input (also updates frame buffers)
         observation = self._build_batch(goals, obs_list, active_mask)
+        build_batch_stats = dict(self._last_build_batch_stats)
 
         rgb_finite = bool(jnp.isfinite(observation["rgb"]).all())
         if not rgb_finite:
@@ -422,7 +450,9 @@ class LAVAPolicy:
             logger.error("Non-finite RGB inputs for envs=%s", nan_envs[:10])
 
         # Run JIT-compiled forward pass (denormalization + clip included)
+        forward_t0 = time.perf_counter()
         actions = np.array(self._forward_jit(self.variables, observation))
+        forward_s = time.perf_counter() - forward_t0
         invalid_action_mask = ~np.isfinite(actions).all(axis=1)
         if invalid_action_mask.any():
             bad_indices = np.flatnonzero(invalid_action_mask).tolist()
@@ -447,5 +477,22 @@ class LAVAPolicy:
 
         # Zero out inactive envs
         actions[~active_mask] = 0.0
+        self._last_predict_stats = {
+            "kind": "vla_predict",
+            "build_batch_s": float(build_batch_stats.get("total_s", 0.0)),
+            "gather_active_rgb_s": float(build_batch_stats.get("gather_active_rgb_s", 0.0)),
+            "frame_update_s": float(build_batch_stats.get("frame_update_s", 0.0)),
+            "token_batch_s": float(build_batch_stats.get("token_batch_s", 0.0)),
+            "instruction_to_device_s": float(build_batch_stats.get("instruction_to_device_s", 0.0)),
+            "forward_s": float(forward_s),
+            "total_s": float(time.perf_counter() - predict_t0),
+            "n_active": int(n_active),
+            "batch_size": int(batch_size),
+            "preprocess_mode": self.preprocess_mode,
+        }
 
         return [actions[i].astype(np.float32) for i in range(batch_size)]
+
+    def get_last_predict_stats(self) -> Dict[str, float]:
+        """Return timing stats for the most recent ``predict()`` call."""
+        return dict(self._last_predict_stats)
