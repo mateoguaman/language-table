@@ -296,7 +296,7 @@ def main():
     parser.add_argument("--include_rgb", action="store_true")
     parser.add_argument("--vla_checkpoint", type=str, default=None)
     parser.add_argument("--preprocess_mode", type=str, default="batched_tf",
-                        choices=["original", "batched_tf", "jax_gpu"],
+                        choices=["original", "batched_tf", "jax_gpu", "jax_fused"],
                         help="Image preprocessing strategy for LAVA _build_batch")
     parser.add_argument("--policy", type=str, default="lava",
                         choices=["lava", "gemini"])

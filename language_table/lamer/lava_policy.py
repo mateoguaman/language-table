@@ -17,7 +17,7 @@ Usage:
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -149,7 +149,7 @@ def _jax_preprocess_rgb_batch(images_uint8: np.ndarray) -> jnp.ndarray:
     return images
 
 
-PREPROCESS_MODES = ("original", "batched_tf", "jax_gpu")
+PREPROCESS_MODES = ("original", "batched_tf", "jax_gpu", "jax_fused")
 
 
 def _tokenize_instruction_string(instruction_str, tokenizer):
@@ -190,6 +190,9 @@ class LAVAPolicy:
           ~2x end-to-end speedup, bit-exact with original).
         - ``"jax_gpu"`` — preprocess on GPU via JAX (~2.1x end-to-end
           speedup, ~6e-4 max action error vs original).
+        - ``"jax_fused"`` — keep CLIP tokenization on host, then fuse GPU
+          preprocess, frame-buffer update, forward, and postprocess into a
+          single compiled path.
     """
 
     def __init__(
@@ -236,6 +239,8 @@ class LAVAPolicy:
             state_dict["norm_info"]["action_statistics"]["mean"])
         self.action_std = np.array(
             state_dict["norm_info"]["action_statistics"]["std"])
+        self._action_mean_jax = jnp.array(self.action_mean)
+        self._action_std_jax = jnp.array(self.action_std)
 
         # Build CLIP tokenizer — same as eval/wrappers.py lines 33-34
         vocab_lookup = clip_tokenizer.create_vocab()
@@ -248,6 +253,7 @@ class LAVAPolicy:
 
         # JIT-compile the forward pass
         self._forward_jit = jax.jit(self._forward_fn)
+        self._fused_predict_jit = jax.jit(self._fused_predict_fn)
 
         logger.info("LAVA policy loaded (preprocess_mode=%s, action_mean=%s, "
                      "action_std=%s)",
@@ -269,10 +275,65 @@ class LAVAPolicy:
         normalized_action = self.model.apply(
             variables, observation, train=False)
         action = (
-            normalized_action * jnp.maximum(self.action_std, EPS)
-            + self.action_mean)
+            normalized_action * jnp.maximum(self._action_std_jax, EPS)
+            + self._action_mean_jax)
         action = jnp.clip(action, -self.action_clip, self.action_clip)
         return action
+
+    def _fused_predict_fn(
+        self,
+        variables,
+        frame_array: jnp.ndarray,
+        frame_step: jnp.ndarray,
+        images_uint8: jnp.ndarray,
+        instruction_tokens: jnp.ndarray,
+        update_mask: jnp.ndarray,
+        action_mask: jnp.ndarray,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Run preprocess, frame update, forward, and masking in one trace."""
+        batch_size, h, w, c = images_uint8.shape
+        off_h, off_w, crop_h, crop_w = _compute_crop_params(h, w)
+
+        images = images_uint8.astype(jnp.float32) / 255.0
+        images = images[:, off_h:off_h + crop_h, off_w:off_w + crop_w, :]
+        images = jax.image.resize(
+            images,
+            (batch_size, DATA_TARGET_HEIGHT, DATA_TARGET_WIDTH, c),
+            method="bilinear",
+        )
+
+        tiled = jnp.repeat(images[:, None], self.sequence_length, axis=1)
+        shifted = jnp.concatenate([frame_array[:, 1:], images[:, None]], axis=1)
+
+        first_mask = jnp.logical_and(update_mask, frame_step == 0)
+        continue_mask = jnp.logical_and(update_mask, frame_step > 0)
+        updated_frame_array = jnp.where(
+            first_mask[:, None, None, None, None],
+            tiled,
+            frame_array,
+        )
+        updated_frame_array = jnp.where(
+            continue_mask[:, None, None, None, None],
+            shifted,
+            updated_frame_array,
+        )
+        updated_frame_step = frame_step + update_mask.astype(frame_step.dtype)
+
+        normalized_action = self.model.apply(
+            variables,
+            {
+                "rgb": updated_frame_array,
+                "instruction_tokenized_clip": instruction_tokens,
+            },
+            train=False,
+        )
+        action = (
+            normalized_action * jnp.maximum(self._action_std_jax, EPS)
+            + self._action_mean_jax
+        )
+        action = jnp.clip(action, -self.action_clip, self.action_clip)
+        action = jnp.where(action_mask[:, None], action, 0.0)
+        return updated_frame_array, updated_frame_step, action
 
     def reset(self, num_envs: int):
         """Clear frame history for all environments.
@@ -284,7 +345,83 @@ class LAVAPolicy:
         self._frame_array = jnp.zeros(
             (num_envs, self.sequence_length, DATA_TARGET_HEIGHT,
              DATA_TARGET_WIDTH, 3), dtype=jnp.float32)
-        self._frame_step = np.zeros(num_envs, dtype=np.int64)
+        self._frame_step = jnp.zeros(num_envs, dtype=jnp.int32)
+
+    def _build_instruction_batch(
+        self,
+        goals: List[str],
+        active_mask: np.ndarray,
+    ) -> Tuple[jnp.ndarray, float, float]:
+        batch_size = len(goals)
+        token_batch_t0 = time.perf_counter()
+        clip_batch = np.zeros(
+            (batch_size, self.sequence_length, 77), dtype=np.int32)
+        for i in range(batch_size):
+            if not active_mask[i]:
+                continue
+            tokens = self._tokenize(goals[i])
+            clip_batch[i] = tokens[None]
+        token_batch_s = time.perf_counter() - token_batch_t0
+
+        instruction_to_device_t0 = time.perf_counter()
+        instruction_tokens = jnp.array(clip_batch)
+        instruction_to_device_s = time.perf_counter() - instruction_to_device_t0
+        return instruction_tokens, token_batch_s, instruction_to_device_s
+
+    def _build_fused_inputs(
+        self,
+        goals: List[str],
+        obs_list: List[Dict[str, Any]],
+        action_mask: np.ndarray,
+    ) -> Tuple[np.ndarray, jnp.ndarray, jnp.ndarray]:
+        batch_t0 = time.perf_counter()
+        batch_size = len(goals)
+
+        gather_t0 = time.perf_counter()
+        rgb_shape = None
+        for i in range(batch_size):
+            if not action_mask[i]:
+                continue
+            rgb = obs_list[i].get("rgb")
+            if rgb is not None:
+                rgb_shape = np.asarray(rgb).shape
+                break
+        if rgb_shape is None:
+            rgb_shape = (DATA_TARGET_HEIGHT, DATA_TARGET_WIDTH, 3)
+
+        rgb_batch = np.zeros((batch_size, *rgb_shape), dtype=np.uint8)
+        update_mask = np.zeros(batch_size, dtype=bool)
+        for i in range(batch_size):
+            if not action_mask[i]:
+                continue
+            rgb = obs_list[i].get("rgb")
+            if rgb is None:
+                logger.warning("Env %d: no 'rgb' in obs, using previous frame state", i)
+                continue
+            rgb_np = np.asarray(rgb)
+            if rgb_np.shape != rgb_shape:
+                raise ValueError(
+                    f"Expected RGB shape {rgb_shape} but got {rgb_np.shape} for env {i}"
+                )
+            rgb_batch[i] = rgb_np
+            update_mask[i] = True
+        gather_s = time.perf_counter() - gather_t0
+
+        instruction_tokens, token_batch_s, instruction_to_device_s = (
+            self._build_instruction_batch(goals, action_mask)
+        )
+
+        self._last_build_batch_stats = {
+            "gather_active_rgb_s": float(gather_s),
+            "frame_update_s": 0.0,
+            "token_batch_s": float(token_batch_s),
+            "instruction_to_device_s": float(instruction_to_device_s),
+            "total_s": float(time.perf_counter() - batch_t0),
+            "n_active": int(update_mask.sum()),
+            "batch_size": int(batch_size),
+            "preprocess_mode": self.preprocess_mode,
+        }
+        return rgb_batch, instruction_tokens, jnp.array(update_mask)
 
     def _update_frame_buffers_batch(
         self,
@@ -309,8 +446,9 @@ class LAVAPolicy:
         else:  # jax_gpu
             preprocessed = _jax_preprocess_rgb_batch(stacked)
 
-        idx = np.array(env_indices)
-        is_first = self._frame_step[idx] == 0
+        idx_np = np.array(env_indices, dtype=np.int32)
+        idx = jnp.array(idx_np)
+        is_first = np.asarray(self._frame_step)[idx_np] == 0
 
         if is_first.any():
             first_env = idx[is_first]
@@ -328,7 +466,7 @@ class LAVAPolicy:
                 axis=1)
             self._frame_array = self._frame_array.at[cont_env].set(shifted)
 
-        self._frame_step[idx] += 1
+        self._frame_step = self._frame_step.at[idx].add(1)
 
     def _build_batch(
         self,
@@ -368,19 +506,9 @@ class LAVAPolicy:
         self._update_frame_buffers_batch(active_indices, active_rgbs)
         frame_update_s = time.perf_counter() - frame_update_t0
 
-        token_batch_t0 = time.perf_counter()
-        clip_batch = np.zeros(
-            (batch_size, self.sequence_length, 77), dtype=np.int32)
-        for i in range(batch_size):
-            if not active_mask[i]:
-                continue
-            tokens = self._tokenize(goals[i])
-            clip_batch[i] = tokens[None]
-        token_batch_s = time.perf_counter() - token_batch_t0
-
-        instruction_to_device_t0 = time.perf_counter()
-        instruction_tokens = jnp.array(clip_batch)
-        instruction_to_device_s = time.perf_counter() - instruction_to_device_t0
+        instruction_tokens, token_batch_s, instruction_to_device_s = (
+            self._build_instruction_batch(goals, active_mask)
+        )
 
         self._last_build_batch_stats = {
             "gather_active_rgb_s": float(gather_s),
@@ -437,27 +565,53 @@ class LAVAPolicy:
 
         predict_t0 = time.perf_counter()
 
-        # Build batched input (also updates frame buffers)
-        observation = self._build_batch(goals, obs_list, active_mask)
-        build_batch_stats = dict(self._last_build_batch_stats)
+        build_batch_stats = {}
+        clip_tokens_obs = None
+        if self.preprocess_mode == "jax_fused":
+            rgb_batch, instruction_tokens, update_mask = self._build_fused_inputs(
+                goals,
+                obs_list,
+                active_mask,
+            )
+            build_batch_stats = dict(self._last_build_batch_stats)
+            forward_t0 = time.perf_counter()
+            self._frame_array, self._frame_step, fused_actions = self._fused_predict_jit(
+                self.variables,
+                self._frame_array,
+                self._frame_step,
+                jnp.array(rgb_batch),
+                instruction_tokens,
+                update_mask,
+                jnp.array(active_mask),
+            )
+            actions = np.array(fused_actions)
+            forward_s = time.perf_counter() - forward_t0
+            rgb_obs = self._frame_array
+            clip_tokens_obs = instruction_tokens
+        else:
+            # Build batched input (also updates frame buffers)
+            observation = self._build_batch(goals, obs_list, active_mask)
+            build_batch_stats = dict(self._last_build_batch_stats)
+            rgb_obs = observation["rgb"]
+            clip_tokens_obs = observation["instruction_tokenized_clip"]
 
-        rgb_finite = bool(jnp.isfinite(observation["rgb"]).all())
+            # Run JIT-compiled forward pass (denormalization + clip included)
+            forward_t0 = time.perf_counter()
+            actions = np.array(self._forward_jit(self.variables, observation))
+            forward_s = time.perf_counter() - forward_t0
+
+        rgb_finite = bool(jnp.isfinite(rgb_obs).all())
         if not rgb_finite:
-            rgb_obs_np = np.asarray(observation["rgb"])
+            rgb_obs_np = np.asarray(rgb_obs)
             nan_envs = np.flatnonzero(
                 ~np.isfinite(rgb_obs_np.reshape(len(goals), -1)).all(axis=1)
             ).tolist()
             logger.error("Non-finite RGB inputs for envs=%s", nan_envs[:10])
-
-        # Run JIT-compiled forward pass (denormalization + clip included)
-        forward_t0 = time.perf_counter()
-        actions = np.array(self._forward_jit(self.variables, observation))
-        forward_s = time.perf_counter() - forward_t0
         invalid_action_mask = ~np.isfinite(actions).all(axis=1)
         if invalid_action_mask.any():
             bad_indices = np.flatnonzero(invalid_action_mask).tolist()
-            rgb_obs_np = np.asarray(observation["rgb"])
-            clip_obs_np = np.asarray(observation["instruction_tokenized_clip"])
+            rgb_obs_np = np.asarray(rgb_obs)
+            clip_obs_np = np.asarray(clip_tokens_obs)
 
             diag_lines = [
                 f"LAVA non-finite actions for envs={bad_indices[:10]}",
@@ -475,8 +629,10 @@ class LAVAPolicy:
             logger.warning(diag_msg)
             actions[invalid_action_mask] = 0.0
 
-        # Zero out inactive envs
-        actions[~active_mask] = 0.0
+        # Zero out inactive envs for the non-fused path. The fused path already
+        # applies masking inside the compiled function.
+        if self.preprocess_mode != "jax_fused":
+            actions[~active_mask] = 0.0
         self._last_predict_stats = {
             "kind": "vla_predict",
             "build_batch_s": float(build_batch_stats.get("total_s", 0.0)),

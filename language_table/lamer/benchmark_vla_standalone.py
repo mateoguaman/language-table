@@ -8,8 +8,9 @@ Measures:
   4. Preprocessing (TF image ops + CLIP tokenization) vs JAX forward time
 
 When ``--modes`` includes multiple preprocess modes (original, batched_tf,
-jax_gpu), the benchmark runs each mode in turn and prints comparison tables
-plus an accuracy check (action-level equivalence on identical inputs).
+jax_gpu, jax_fused), the benchmark runs each mode in turn and prints
+comparison tables plus an accuracy check (action-level equivalence on
+identical inputs).
 
 Runs in the language-table conda env (ltvenv).
 
@@ -21,7 +22,7 @@ Usage:
         --checkpoint_dir /path/to/checkpoints/ \
         --batch_sizes 1,2,4,8,16,32,64,128,256,512 \
         --num_warmup 3 --num_iters 20 \
-        --modes original,batched_tf,jax_gpu
+        --modes original,batched_tf,jax_gpu,jax_fused
 """
 
 import argparse
@@ -113,16 +114,38 @@ def benchmark_vla_inference(policy, batch_size, num_warmup, num_iters):
 
         t_total_start = time.perf_counter()
 
-        # Preprocess: build batch (TF image ops + CLIP tokenization)
-        t_pre_start = time.perf_counter()
-        observation = policy._build_batch(goals, obs_list_iter, active_mask)
-        t_pre_end = time.perf_counter()
+        if policy.preprocess_mode == "jax_fused":
+            t_pre_start = time.perf_counter()
+            rgb_batch, instruction_tokens, update_mask = policy._build_fused_inputs(
+                goals,
+                obs_list_iter,
+                active_mask,
+            )
+            t_pre_end = time.perf_counter()
 
-        # Forward: JAX JIT inference
-        t_fwd_start = time.perf_counter()
-        actions = policy._forward_jit(policy.variables, observation)
-        actions.block_until_ready()
-        t_fwd_end = time.perf_counter()
+            t_fwd_start = time.perf_counter()
+            policy._frame_array, policy._frame_step, actions = policy._fused_predict_jit(
+                policy.variables,
+                policy._frame_array,
+                policy._frame_step,
+                jnp.array(rgb_batch),
+                instruction_tokens,
+                update_mask,
+                jnp.array(active_mask),
+            )
+            actions.block_until_ready()
+            t_fwd_end = time.perf_counter()
+        else:
+            # Preprocess: build batch (TF image ops + CLIP tokenization)
+            t_pre_start = time.perf_counter()
+            observation = policy._build_batch(goals, obs_list_iter, active_mask)
+            t_pre_end = time.perf_counter()
+
+            # Forward: JAX JIT inference
+            t_fwd_start = time.perf_counter()
+            actions = policy._forward_jit(policy.variables, observation)
+            actions.block_until_ready()
+            t_fwd_end = time.perf_counter()
 
         t_total_end = time.perf_counter()
 
@@ -345,7 +368,7 @@ def main():
     parser.add_argument("--num_iters", type=int, default=20)
     parser.add_argument("--modes", type=str, default="original",
                         help="Comma-separated preprocess modes to benchmark "
-                             "(original, batched_tf, jax_gpu)")
+                             "(original, batched_tf, jax_gpu, jax_fused)")
     parser.add_argument("--accuracy_steps", type=int, default=3,
                         help="Number of predict steps for accuracy comparison "
                              "(only used when --modes has multiple entries)")
