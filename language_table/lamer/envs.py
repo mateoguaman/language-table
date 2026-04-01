@@ -8,7 +8,6 @@ each Ray actor holds an independent LanguageTable gym.Env instance.
 import copy
 import logging
 import time
-from multiprocessing import shared_memory
 
 import ray
 import numpy as np
@@ -57,21 +56,6 @@ class LanguageTableWorker:
         self._restart_bullet_state = None
         self._restart_python_state = None
 
-    def attach_shm(self, shm_name, worker_idx, frame_bytes):
-        """Attach to the coordinator's shared memory buffer for RGB."""
-        self._shm = shared_memory.SharedMemory(name=shm_name, create=False)
-        self._shm_view = np.ndarray(
-            (180, 320, 3), dtype=np.uint8,
-            buffer=self._shm.buf,
-            offset=worker_idx * frame_bytes,
-        )
-
-    def _write_rgb_to_shm(self, obs_dict):
-        """Write RGB to shared memory and strip it from the dict."""
-        if hasattr(self, '_shm_view') and 'rgb' in obs_dict:
-            np.copyto(self._shm_view, obs_dict['rgb'])
-            del obs_dict['rgb']
-
     def _skip_render(self):
         """Disable RGB rendering temporarily."""
         self.env._render_camera = self._noop_render
@@ -112,7 +96,6 @@ class LanguageTableWorker:
                 self._restore_render()
 
         result_obs = self._extract_obs(obs, self.env._last_state)
-        self._write_rgb_to_shm(result_obs)
         return result_obs, reward, done, info
 
     def reset(self, seed=None):
@@ -133,7 +116,6 @@ class LanguageTableWorker:
 
         obs = self._extract_obs(None, self.env._last_state)
         self._save_restart_snapshot(obs)
-        self._write_rgb_to_shm(obs)
         return obs, {}
 
     def render(self):
@@ -190,7 +172,6 @@ class LanguageTableWorker:
             obs = self.env._compute_observation(state=state)
         if not self._render_obs:
             obs.pop("rgb", None)
-        self._write_rgb_to_shm(obs)
         return obs, {}
 
     def get_pybullet_state(self):
@@ -242,10 +223,6 @@ class LanguageTableMultiProcessEnv:
     Each Ray actor holds an independent LanguageTable instance.
     """
 
-    # RGB frame dimensions (Language Table constants)
-    _RGB_H, _RGB_W, _RGB_C = 180, 320, 3
-    _RGB_FRAME_BYTES = _RGB_H * _RGB_W * _RGB_C  # 172,800
-
     def __init__(
         self,
         num_envs,
@@ -258,7 +235,6 @@ class LanguageTableMultiProcessEnv:
         timeout=None,
         return_full_state=True,
         render_obs=True,
-        use_shm_rgb=True,
         **env_kwargs,
     ):
         if not ray.is_initialized():
@@ -270,7 +246,6 @@ class LanguageTableMultiProcessEnv:
         self.num_processes = num_envs * group_n
         self.timeout = timeout
         self._last_step_stats = {}
-        self._use_shm_rgb = use_shm_rgb and render_obs
 
         np.random.seed(seed)
 
@@ -287,25 +262,6 @@ class LanguageTableMultiProcessEnv:
             )
             for i in range(self.num_processes)
         ]
-
-        # Shared memory for RGB observations — workers write directly,
-        # coordinator reads after ray.get() returns metadata.
-        self._shm = None
-        self._rgb_buf = None
-        if self._use_shm_rgb:
-            total_bytes = self._RGB_FRAME_BYTES * self.num_processes
-            self._shm = shared_memory.SharedMemory(
-                create=True, size=total_bytes,
-            )
-            self._rgb_buf = np.ndarray(
-                (self.num_processes, self._RGB_H, self._RGB_W, self._RGB_C),
-                dtype=np.uint8,
-                buffer=self._shm.buf,
-            )
-            ray.get([
-                w.attach_shm.remote(self._shm.name, i, self._RGB_FRAME_BYTES)
-                for i, w in enumerate(self.workers)
-            ])
 
     def step(self, actions, active_mask=None, cached_obs=None, cached_infos=None):
         """Step active envs in parallel.
@@ -340,9 +296,6 @@ class LanguageTableMultiProcessEnv:
                 reward_list.append(reward)
                 done_list.append(done)
                 info_list.append(info)
-            if self._use_shm_rgb:
-                for idx, obs in enumerate(obs_list):
-                    obs['rgb'] = self._rgb_buf[idx].copy()
             unpack_s = time.perf_counter() - unpack_t0
             self._last_step_stats = {
                 "kind": "ray_env_step",
@@ -398,10 +351,6 @@ class LanguageTableMultiProcessEnv:
             done_list[idx] = done
             info_list[idx] = info
 
-        if self._use_shm_rgb:
-            for idx in active_indices:
-                obs_list[idx]['rgb'] = self._rgb_buf[idx].copy()
-
         for idx in range(self.num_processes):
             if not active_mask[idx]:
                 info_list[idx]["skipped_step_after_done"] = True
@@ -436,9 +385,6 @@ class LanguageTableMultiProcessEnv:
         for obs, info in results:
             obs_list.append(obs)
             info_list.append(info)
-        if self._use_shm_rgb:
-            for idx, obs in enumerate(obs_list):
-                obs['rgb'] = self._rgb_buf[idx].copy()
         return obs_list, info_list
 
     def render(self, env_idx=None):
@@ -456,19 +402,11 @@ class LanguageTableMultiProcessEnv:
         for obs, info in results:
             obs_list.append(obs)
             info_list.append(info)
-        if self._use_shm_rgb:
-            for idx, obs in enumerate(obs_list):
-                obs['rgb'] = self._rgb_buf[idx].copy()
         return obs_list, info_list
 
     def close(self):
         for w in self.workers:
             ray.kill(w)
-        if self._shm is not None:
-            self._shm.close()
-            self._shm.unlink()
-            self._shm = None
-            self._rgb_buf = None
 
     def __del__(self):
         try:

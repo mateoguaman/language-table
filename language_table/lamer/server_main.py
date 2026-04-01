@@ -72,7 +72,7 @@ def _load_vla_policy(checkpoint_path, preprocess_mode="original"):
 
 
 def _create_env_pool(num_envs, group_n, block_mode, reward_factory_cls,
-                     seed, render_obs, return_full_state, use_shm_rgb=True):
+                     seed, render_obs, return_full_state):
     """Create a Ray-parallelized environment pool."""
     from .envs import LanguageTableMultiProcessEnv
 
@@ -84,7 +84,6 @@ def _create_env_pool(num_envs, group_n, block_mode, reward_factory_cls,
         group_n=group_n,
         return_full_state=return_full_state,
         render_obs=render_obs,
-        use_shm_rgb=use_shm_rgb,
     )
 
 
@@ -164,7 +163,6 @@ def _run_single(args):
         group_n=args.group_n,
         return_full_state=not args.no_full_state,
         render_obs=render_obs,
-        use_shm_rgb=not args.no_shm_rgb,
     )
 
     logger.info("Warming up %d workers (test reset)...", args.num_envs * args.group_n)
@@ -231,7 +229,6 @@ def _run_unified(args):
         seed=args.seed,
         render_obs=render_obs,
         return_full_state=not args.no_full_state,
-        use_shm_rgb=not args.no_shm_rgb,
     )
 
     # Create val env pool (offset seed to avoid overlap)
@@ -249,7 +246,6 @@ def _run_unified(args):
         seed=val_seed,
         render_obs=render_obs,
         return_full_state=not args.no_full_state,
-        use_shm_rgb=not args.no_shm_rgb,
     )
 
     # Warm up both pools
@@ -297,9 +293,6 @@ def main():
     parser.add_argument("--no_reward", action="store_true")
     parser.add_argument("--no_full_state", action="store_true")
     parser.add_argument("--no_render", action="store_true")
-    parser.add_argument("--no_shm_rgb", action="store_true",
-                        help="Disable shared memory optimization for RGB observations. "
-                             "Falls back to passing RGB through Ray serialization.")
     parser.add_argument("--include_rgb", action="store_true")
     parser.add_argument("--vla_checkpoint", type=str, default=None)
     parser.add_argument("--preprocess_mode", type=str, default="batched_tf",
