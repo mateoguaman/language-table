@@ -55,7 +55,8 @@ class LanguageTable(gym.Env):
                delay_reward_steps=0,
                render_text_in_image=True,
                debug_visuals = False,
-               add_invisible_walls = False):
+               add_invisible_walls = False,
+               include_rgb_no_arm = False):
     """Creates an env instance.
 
     Args:
@@ -76,6 +77,10 @@ class LanguageTable(gym.Env):
       debug_visuals: bool, Whether to render debug visuals.
       add_invisible_walls: bool, (Experimental) Whether to add walls that
         prevent the blocks from sliding off the edges.
+      include_rgb_no_arm: If True, each observation additionally contains
+        `rgb_no_arm`, a render of the scene with the xarm + end effector
+        hidden (same camera as `rgb`). Costs a second camera pass per step;
+        intended for evaluation (e.g. VLM scene checks) rather than training.
     """
     self._block_mode = block_mode
     self._training = training
@@ -93,6 +98,10 @@ class LanguageTable(gym.Env):
     self._add_invisible_walls = add_invisible_walls
 
     self._render_text_in_image = render_text_in_image
+    self._include_rgb_no_arm = include_rgb_no_arm
+    # Lazily populated cache of (body_id, link_index, rgba) tuples for all arm
+    # + end-effector visuals. Populated on first no-arm render.
+    self._arm_visual_cache = None
 
     self._rng = np.random.RandomState(seed=seed)
 
@@ -199,6 +208,16 @@ class LanguageTable(gym.Env):
     if self._instruction is not None:
       debug_info['instruction'] = self._instruction_str
     return add_debug_info_to_image(image, debug_info)
+
+  def render_no_arm(self, mode='rgb_array'):
+    """Render the scene with the xarm + end effector hidden.
+
+    Same camera as `render()`. Useful for scene-arrangement evaluators (e.g. a
+    VLM checking whether the blocks form a letter) that would otherwise be
+    confused by arm occlusion. Sim state is untouched after this call.
+    """
+    del mode
+    return self._render_camera_no_arm(image_size=self._image_size)
 
   @property
   def succeeded(self):
@@ -415,6 +434,8 @@ class LanguageTable(gym.Env):
         instruction=state['instruction'],
         rgb=state['rgb'],
     )
+    if self._include_rgb_no_arm and 'rgb_no_arm' in state:
+      obs['rgb_no_arm'] = state['rgb_no_arm']
     return obs
 
   def _compute_state(
@@ -477,6 +498,8 @@ class LanguageTable(gym.Env):
 
     image = self._render_camera(self._image_size)
     obs['rgb'] = image
+    if self._include_rgb_no_arm:
+      obs['rgb_no_arm'] = self._render_camera_no_arm(self._image_size)
     return obs
 
   def _create_observation_space(self, image_size):
@@ -505,6 +528,13 @@ class LanguageTable(gym.Env):
         high=255,
         shape=(image_size[0], image_size[1], 3),
         dtype=np.uint8)
+
+    if self._include_rgb_no_arm:
+      obs_dict['rgb_no_arm'] = spaces.Box(
+          low=0,
+          high=255,
+          shape=(image_size[0], image_size[1], 3),
+          dtype=np.uint8)
 
     return spaces.Dict(obs_dict)
 
@@ -597,6 +627,39 @@ class LanguageTable(gym.Env):
     color = color[:, :, :3]  # remove alpha channel
 
     return color.astype(np.uint8)
+
+  def _populate_arm_visual_cache(self):
+    """Collects (body, link, rgba) tuples for every arm + effector visual."""
+    client = self._pybullet_client
+    entries = []
+    bodies = [self._robot.xarm]
+    if self._robot.end_effector is not None:
+      bodies.append(self._robot.end_effector)
+    for body_id in bodies:
+      for shape in client.getVisualShapeData(body_id):
+        # (objUid, linkIndex, geomType, dims, meshFile, localPos, localOrn,
+        #  rgbaColor, ...)
+        entries.append((body_id, shape[1], tuple(shape[7])))
+    self._arm_visual_cache = entries
+
+  def _render_camera_no_arm(self, image_size):
+    """Render the scene with arm + end effector visuals hidden, then restore.
+
+    Sets alpha=0 on all arm/effector visual shapes for the duration of a
+    single `getCameraImage` call. Physics state is not touched.
+    """
+    if self._arm_visual_cache is None:
+      self._populate_arm_visual_cache()
+    client = self._pybullet_client
+    try:
+      for body_id, link_index, rgba in self._arm_visual_cache:
+        hidden = (rgba[0], rgba[1], rgba[2], 0.0)
+        client.changeVisualShape(body_id, linkIndex=link_index, rgbaColor=hidden)
+      image = self._render_camera(image_size)
+    finally:
+      for body_id, link_index, rgba in self._arm_visual_cache:
+        client.changeVisualShape(body_id, linkIndex=link_index, rgbaColor=rgba)
+    return image
 
   def _step_robot_and_sim(self, action):
     """Steps the robot and pybullet sim."""
