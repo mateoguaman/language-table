@@ -31,8 +31,15 @@ set +u
 conda activate "${ENV_NAME}"
 set -u
 
+# Redirect pip cache + build tmpdir off the home quota (evdev builds from source on py3.12).
+export PIP_CACHE_DIR
+export TMPDIR
+mkdir -p "${PIP_CACHE_DIR}" "${TMPDIR}"
+
 # Install LeRobot with all policy extras
 echo "Installing LeRobot with policy extras..."
+echo "  PIP_CACHE_DIR=${PIP_CACHE_DIR}"
+echo "  TMPDIR=${TMPDIR}"
 pip install 'lerobot[pi0,smolvla,diffusion,act]>=0.5.1'
 
 # Install accelerate for multi-GPU
