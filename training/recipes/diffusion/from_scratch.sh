@@ -54,6 +54,7 @@ TRAIN_CMD=(
     --seed="${SEED}"
     --output_dir="${OUTPUT_DIR}"
     --eval_freq=0
+    --policy.push_to_hub=false
     --wandb.enable=true
     --wandb.project="${WANDB_PROJECT:-language-table-vla}"
 )

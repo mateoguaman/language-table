@@ -12,7 +12,7 @@ TRAINING_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 [ -f "${TRAINING_DIR}/.env.user" ] && source "${TRAINING_DIR}/.env.user"
 
 # --- Training parameters ---
-# LeRobot 0.4.4: use --policy.path for pretrained (type is inferred from checkpoint)
+# LeRobot 0.5.1: use --policy.path for pretrained (type is inferred from checkpoint)
 POLICY_PATH="lerobot/pi0_base"
 DATASET_REPO="mateoguaman/language_table_blocktoblock_oracle_sim"
 DATASET_NAME="language_table_blocktoblock_oracle_sim"
@@ -55,6 +55,7 @@ TRAIN_CMD=(
     --seed="${SEED}"
     --output_dir="${OUTPUT_DIR}"
     --eval_freq=0
+    --policy.push_to_hub=false
     --wandb.enable=true
     --wandb.project="${WANDB_PROJECT:-language-table-vla}"
 )

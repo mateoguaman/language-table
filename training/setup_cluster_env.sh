@@ -23,8 +23,8 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 if conda info --envs | grep -q "^${ENV_NAME} "; then
     echo "Conda env '${ENV_NAME}' already exists. Activating..."
 else
-    echo "Creating conda env '${ENV_NAME}' with Python 3.10..."
-    conda create -n "${ENV_NAME}" python=3.10 -y
+    echo "Creating conda env '${ENV_NAME}' with Python 3.12..."
+    conda create -n "${ENV_NAME}" python=3.12 -y
 fi
 
 set +u
@@ -33,7 +33,7 @@ set -u
 
 # Install LeRobot with all policy extras
 echo "Installing LeRobot with policy extras..."
-pip install 'lerobot[pi0,smolvla,diffusion,act]>=0.4.4'
+pip install 'lerobot[pi0,smolvla,diffusion,act]>=0.5.1'
 
 # Install accelerate for multi-GPU
 pip install accelerate
