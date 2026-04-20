@@ -28,7 +28,8 @@ SEED="${SEED:-1000}"
 
 # --- Output ---
 JOB_NAME="smolvla_expert_small"
-OUTPUT_DIR="${OUTPUT_ROOT:-outputs}/${JOB_NAME}"
+RUN_ID="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
+OUTPUT_DIR="${OUTPUT_ROOT:-outputs}/${JOB_NAME}_${RUN_ID}"
 
 # --- Dataset location ---
 DATASET_ARGS="--dataset.repo_id=${DATASET_REPO}"
