@@ -12,7 +12,7 @@ TRAINING_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 [ -f "${TRAINING_DIR}/.env.user" ] && source "${TRAINING_DIR}/.env.user"
 
 # --- Training parameters ---
-POLICY_TYPE="pi0"
+# LeRobot 0.4.4: use --policy.path for pretrained (type is inferred from checkpoint)
 POLICY_PATH="lerobot/pi0_base"
 DATASET_REPO="mateoguaman/language_table_blocktoblock_oracle_sim"
 DATASET_NAME="language_table_blocktoblock_oracle_sim"
@@ -41,7 +41,6 @@ NUM_GPUS="${NUM_GPUS:-2}"
 
 # --- Build training command ---
 TRAIN_CMD=(
-    --policy.type="${POLICY_TYPE}"
     --policy.path="${POLICY_PATH}"
     ${DATASET_ARGS}
     --batch_size="${BATCH_SIZE}"

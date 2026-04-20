@@ -7,6 +7,8 @@
 #SBATCH --mem=200G
 #SBATCH --qos=normal
 #SBATCH --time=24:00:00
+#SBATCH --output=lt-vla-train-%j.out
+#SBATCH --error=lt-vla-train-%j.err
 #
 # Override defaults at submission time:
 #   sbatch --gres=gpu:1 --cpus-per-task=8 --mem=50G training/slurm/train.slurm
@@ -15,8 +17,10 @@
 set -euo pipefail
 
 # --- Resolve paths ---
-TRAINING_DIR="${TRAINING_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-PROJECT_DIR="$(cd "${TRAINING_DIR}/.." && pwd)"
+# SLURM copies the script to /var/spool, so BASH_SOURCE won't work.
+# Use SLURM_SUBMIT_DIR (the directory sbatch was called from) instead.
+TRAINING_DIR="${TRAINING_DIR:-${SLURM_SUBMIT_DIR}/training}"
+PROJECT_DIR="${SLURM_SUBMIT_DIR}"
 
 # --- Source environment ---
 source "${TRAINING_DIR}/.env.tillicum"

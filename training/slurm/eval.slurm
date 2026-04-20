@@ -7,6 +7,8 @@
 #SBATCH --mem=64G
 #SBATCH --time=4:00:00
 #SBATCH --qos=normal
+#SBATCH --output=lt-vla-eval-%j.out
+#SBATCH --error=lt-vla-eval-%j.err
 #
 # Evaluates a trained policy in the Language Table sim.
 # Requires both ltvenv (for sim) and lerobot conda env (for policy serving).
@@ -21,8 +23,9 @@
 set -euo pipefail
 
 # --- Resolve paths ---
-TRAINING_DIR="${TRAINING_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-PROJECT_DIR="$(cd "${TRAINING_DIR}/.." && pwd)"
+# SLURM copies the script to /var/spool, so BASH_SOURCE won't work.
+TRAINING_DIR="${TRAINING_DIR:-${SLURM_SUBMIT_DIR}/training}"
+PROJECT_DIR="${SLURM_SUBMIT_DIR}"
 
 # --- Source environment ---
 source "${TRAINING_DIR}/.env.tillicum"
