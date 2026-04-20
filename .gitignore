@@ -108,3 +108,6 @@ wandb/
 
 # Ray
 /tmp/ray/
+
+# Training secrets
+training/.env.user
