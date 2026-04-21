@@ -41,6 +41,69 @@ import time
 from pathlib import Path
 
 
+# Preset configs encode (a) which pretrained checkpoint to load and (b) the
+# freeze/train-expert knobs needed to flip between "expert-only" (action head
+# + minimal projections) and "full" (everything unfrozen). Upstream defaults:
+#   smolvla_base: train_expert_only=True,  freeze_vision_encoder=True  -> expert
+#   pi0:          train_expert_only=False, freeze_vision_encoder=False -> full
+#   pi05:         train_expert_only=False, freeze_vision_encoder=False -> full
+# We pin each variant explicitly so probes don't silently inherit a default
+# you didn't mean to test.
+#
+# The rename_map + empty_cameras values pad our 1-camera Language Table dataset
+# up to the 3-camera layout all three VLA families expect (primary=camera1,
+# plus two zero-filled empty_camera_{0,1}).
+_VLA_IMAGE_ARGS = [
+    "--policy.empty_cameras=2",
+    '--rename_map={"observation.images.rgb": "observation.images.camera1"}',
+]
+
+PRESETS = {
+    "smolvla_expert": {
+        "policy_path": "lerobot/smolvla_base",
+        "extra": _VLA_IMAGE_ARGS + [
+            "--policy.train_expert_only=true",
+            "--policy.freeze_vision_encoder=true",
+        ],
+    },
+    "smolvla_full": {
+        "policy_path": "lerobot/smolvla_base",
+        "extra": _VLA_IMAGE_ARGS + [
+            "--policy.train_expert_only=false",
+            "--policy.freeze_vision_encoder=false",
+        ],
+    },
+    "pi0_expert": {
+        "policy_path": "lerobot/pi0",
+        "extra": _VLA_IMAGE_ARGS + [
+            "--policy.train_expert_only=true",
+            "--policy.freeze_vision_encoder=true",
+        ],
+    },
+    "pi0_full": {
+        "policy_path": "lerobot/pi0",
+        "extra": _VLA_IMAGE_ARGS + [
+            "--policy.train_expert_only=false",
+            "--policy.freeze_vision_encoder=false",
+        ],
+    },
+    "pi05_expert": {
+        "policy_path": "lerobot/pi05_base",
+        "extra": _VLA_IMAGE_ARGS + [
+            "--policy.train_expert_only=true",
+            "--policy.freeze_vision_encoder=true",
+        ],
+    },
+    "pi05_full": {
+        "policy_path": "lerobot/pi05_base",
+        "extra": _VLA_IMAGE_ARGS + [
+            "--policy.train_expert_only=false",
+            "--policy.freeze_vision_encoder=false",
+        ],
+    },
+}
+
+
 def run_smi_once(gpu_index: int) -> int:
     """Return used MiB for the given GPU index, or 0 on failure."""
     try:
@@ -103,11 +166,9 @@ def build_cmd(args, batch_size: int, output_dir: Path) -> list[str]:
     ]
     if args.dataset_root:
         cmd.append(f"--dataset.root={args.dataset_root}")
-    # SmolVLA-style adapters only when user passes them.
-    if args.empty_cameras is not None:
-        cmd.append(f"--policy.empty_cameras={args.empty_cameras}")
-    if args.rename_map:
-        cmd.append(f"--rename_map={args.rename_map}")
+    cmd.extend(args.preset_extra)
+    if args.extra_args:
+        cmd.extend(shlex.split(args.extra_args))
     return cmd
 
 
@@ -183,7 +244,15 @@ def probe_one(args, batch_size: int, gpu_index: int) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--policy_path", default="lerobot/smolvla_base")
+    ap.add_argument("--preset", choices=sorted(PRESETS.keys()),
+                    default="smolvla_expert",
+                    help="Policy + training-mode preset. `*_expert` freezes the VLM "
+                         "backbone; `*_full` trains everything. Overrides --policy_path.")
+    ap.add_argument("--policy_path", default=None,
+                    help="Override the preset's pretrained path (optional)")
+    ap.add_argument("--extra_args", default=None,
+                    help="Extra CLI args appended verbatim to lerobot_train, shlex-split "
+                         "(e.g. '--policy.train_expert_only=false --policy.freeze_vision_encoder=false')")
     ap.add_argument("--dataset_repo", required=True)
     ap.add_argument("--dataset_root", default=None,
                     help="Local path to dataset; skip to load via Hub cache")
@@ -194,11 +263,6 @@ def main():
     ap.add_argument("--num_workers", type=int, default=2)
     ap.add_argument("--chunk_size", type=int, default=10)
     ap.add_argument("--video_backend", default="pyav")
-    ap.add_argument("--empty_cameras", type=int, default=2,
-                    help="SmolVLA expects 3 cameras; we have 1 — pad with this many empties")
-    ap.add_argument("--rename_map",
-                    default='{"observation.images.rgb": "observation.images.camera1"}',
-                    help='JSON string passed to --rename_map (SmolVLA "primary camera" key)')
     ap.add_argument("--gpu_index", type=int, default=0,
                     help="Physical GPU to bind CUDA_VISIBLE_DEVICES to")
     ap.add_argument("--poll_interval_s", type=float, default=0.5)
@@ -208,6 +272,11 @@ def main():
                     help="Optional path to dump full results as JSON")
     args = ap.parse_args()
 
+    preset = PRESETS[args.preset]
+    if args.policy_path is None:
+        args.policy_path = preset["policy_path"]
+    args.preset_extra = preset["extra"]
+
     sizes = parse_batch_sizes(args.batch_sizes)
     if not sizes:
         print("No batch sizes given", file=sys.stderr)
@@ -216,7 +285,11 @@ def main():
     total_mib = gpu_total_mib(args.gpu_index)
     print(f"GPU {args.gpu_index} total memory: {total_mib} MiB "
           f"(~{total_mib/1024:.1f} GiB)")
+    print(f"Preset: {args.preset}")
     print(f"Policy: {args.policy_path}")
+    print(f"Preset flags: {' '.join(args.preset_extra)}")
+    if args.extra_args:
+        print(f"Extra flags: {args.extra_args}")
     print(f"Dataset: {args.dataset_repo}  root={args.dataset_root or '<hub cache>'}")
     print(f"Probing batch sizes: {sizes}")
     print()
