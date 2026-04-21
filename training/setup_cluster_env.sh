@@ -43,7 +43,9 @@ mkdir -p "${PIP_CACHE_DIR}" "${TMPDIR}"
 echo "Installing LeRobot with policy extras..."
 echo "  PIP_CACHE_DIR=${PIP_CACHE_DIR}"
 echo "  TMPDIR=${TMPDIR}"
-pip install 'lerobot[pi0,smolvla,diffusion,act]>=0.5.1'
+# In lerobot 0.5.1, ACT and Diffusion ship with the base install (no extra needed).
+# Pi0 is now exposed as the `pi` extra (not `pi0`). SmolVLA has its own extra.
+pip install 'lerobot[pi,smolvla]>=0.5.1'
 pip install av
 
 # Install accelerate for multi-GPU

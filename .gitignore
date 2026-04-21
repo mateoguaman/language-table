@@ -58,6 +58,9 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+ltvenv/
+lerobot_env/
+lerobot_env_v51/
 
 # Jupyter Notebook
 .ipynb_checkpoints
