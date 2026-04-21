@@ -54,6 +54,7 @@ TRAIN_CMD=(
     --policy.gradient_checkpointing=true
     --policy.empty_cameras=2
     --rename_map='{"observation.images.rgb": "observation.images.camera1"}'
+    --dataset.video_backend=pyav
     --num_workers="${NUM_WORKERS}"
     --seed="${SEED}"
     --output_dir="${OUTPUT_DIR}"

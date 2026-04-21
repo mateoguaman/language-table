@@ -49,6 +49,7 @@ TRAIN_CMD=(
     --log_freq="${LOG_FREQ}"
     --policy.chunk_size="${CHUNK_SIZE}"
     --policy.n_action_steps="${N_ACTION_STEPS}"
+    --dataset.video_backend=pyav
     --num_workers="${NUM_WORKERS}"
     --seed="${SEED}"
     --output_dir="${OUTPUT_DIR}"

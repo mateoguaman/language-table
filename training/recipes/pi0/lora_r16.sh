@@ -53,6 +53,7 @@ TRAIN_CMD=(
     --policy.n_action_steps="${N_ACTION_STEPS}"
     --policy.empty_cameras=2
     --rename_map='{"observation.images.rgb": "observation.images.camera1"}'
+    --dataset.video_backend=pyav
     --peft.method_type=LORA
     --peft.r="${LORA_RANK}"
     --num_workers="${NUM_WORKERS}"

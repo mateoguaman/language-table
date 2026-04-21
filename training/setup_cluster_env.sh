@@ -36,11 +36,15 @@ export PIP_CACHE_DIR
 export TMPDIR
 mkdir -p "${PIP_CACHE_DIR}" "${TMPDIR}"
 
-# Install LeRobot with all policy extras
+# Install LeRobot with all policy extras.
+# Note: we use the `pyav` video backend in recipes (via --dataset.video_backend=pyav).
+# pyav ships a self-contained FFmpeg wheel, so we avoid conda-installing system ffmpeg
+# (which is flaky on GPFS scrubbed due to mid-extract file cleanup).
 echo "Installing LeRobot with policy extras..."
 echo "  PIP_CACHE_DIR=${PIP_CACHE_DIR}"
 echo "  TMPDIR=${TMPDIR}"
 pip install 'lerobot[pi0,smolvla,diffusion,act]>=0.5.1'
+pip install av
 
 # Install accelerate for multi-GPU
 pip install accelerate

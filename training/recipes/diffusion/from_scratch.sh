@@ -51,6 +51,7 @@ TRAIN_CMD=(
     --policy.horizon="${HORIZON}"
     --policy.n_action_steps="${N_ACTION_STEPS}"
     --policy.n_obs_steps="${N_OBS_STEPS}"
+    --dataset.video_backend=pyav
     --num_workers="${NUM_WORKERS}"
     --seed="${SEED}"
     --output_dir="${OUTPUT_DIR}"
