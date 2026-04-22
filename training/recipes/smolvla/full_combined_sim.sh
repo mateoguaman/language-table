@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# SmolVLA expert-only finetune on language_table_sim_combined (~1.2M eps, ~58M frames).
-# Combined dataset = all 8 sim-only Language Table datasets merged.
-# Target: 4 GPUs (default). Probed ceiling on H200: bs=256+ per GPU at 47.6%
-# VRAM (see docs/batch-size-probes.md) — data loading (pyav video decode) is
-# the bottleneck, not memory. Default bs=128 leaves headroom for NCCL/grad
-# bucketing; raise NUM_WORKERS before pushing batch higher.
+# SmolVLA full finetune on language_table_sim_combined (~1.2M eps, ~58M frames).
+# Every param trainable: SigLIP vision, SmolLM backbone, action expert, projections.
+# Target: 4 GPUs. Probed ceiling on H200: bs=96 per GPU at 82.3% VRAM
+# (see docs/batch-size-probes.md). bs=128 would extrapolate to ~154 GiB (OOM).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,27 +13,29 @@ TRAINING_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 [ -f "${TRAINING_DIR}/.env.user" ] && source "${TRAINING_DIR}/.env.user"
 
 # --- Training parameters ---
-# LeRobot 0.5.1: use --policy.path for pretrained (type is inferred from checkpoint)
 POLICY_PATH="lerobot/smolvla_base"
 DATASET_REPO="mateoguaman/language_table_sim_combined"
 DATASET_NAME="language_table_sim_combined"
 
-# SmolVLA expert-only bs=128 per GPU measured at ~35 GiB (24.5%) on H200.
-# With 4 GPUs that's an effective batch of 512.
-BATCH_SIZE="${BATCH_SIZE:-128}"
+BATCH_SIZE="${BATCH_SIZE:-96}"
+# STEPS is derived from EPOCHS when set. LeRobot only accepts --steps, so we
+# convert: steps = ceil(EPOCHS * total_frames / (BATCH_SIZE * NUM_GPUS)).
+# total_frames comes from ${DATASET_ROOT}/${DATASET_NAME}/meta/info.json.
+EPOCHS="${EPOCHS:-}"
 STEPS="${STEPS:-100000}"
 SAVE_FREQ="${SAVE_FREQ:-10000}"
 LOG_FREQ="${LOG_FREQ:-100}"
 CHUNK_SIZE="${CHUNK_SIZE:-10}"
 N_ACTION_STEPS="${N_ACTION_STEPS:-10}"
-# ~2 workers per cpu-per-gpu (cpus-per-task=32 on 4 GPUs = 8 cpus/GPU).
 NUM_WORKERS="${NUM_WORKERS:-8}"
 SEED="${SEED:-1000}"
+RESUME="${RESUME:-false}"
 
 # --- Output ---
-JOB_NAME="smolvla_combined_sim"
+# Override OUTPUT_DIR directly when resuming (RESUME=true needs the old dir).
+JOB_NAME="smolvla_full_combined_sim"
 RUN_ID="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
-OUTPUT_DIR="${OUTPUT_ROOT:-outputs}/${JOB_NAME}_${RUN_ID}"
+OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT:-outputs}/${JOB_NAME}_${RUN_ID}}"
 
 # --- Dataset location ---
 DATASET_ARGS="--dataset.repo_id=${DATASET_REPO}"
@@ -45,6 +45,23 @@ fi
 
 # --- GPU count ---
 NUM_GPUS="${NUM_GPUS:-4}"
+
+# --- Convert EPOCHS -> STEPS if requested ---
+if [ -n "${EPOCHS}" ]; then
+    INFO_JSON=""
+    if [ -n "${DATASET_ROOT:-}" ] && [ -f "${DATASET_ROOT}/${DATASET_NAME}/meta/info.json" ]; then
+        INFO_JSON="${DATASET_ROOT}/${DATASET_NAME}/meta/info.json"
+    fi
+    if [ -z "${INFO_JSON}" ]; then
+        echo "ERROR: EPOCHS=${EPOCHS} requires a local dataset so total_frames can be read."
+        echo "       Expected ${DATASET_ROOT}/${DATASET_NAME}/meta/info.json"
+        exit 1
+    fi
+    TOTAL_FRAMES=$(python -c "import json; print(json.load(open('${INFO_JSON}'))['total_frames'])")
+    EFF_BS=$((BATCH_SIZE * NUM_GPUS))
+    STEPS=$(python -c "import math; print(math.ceil(${EPOCHS} * ${TOTAL_FRAMES} / ${EFF_BS}))")
+    echo "EPOCHS=${EPOCHS} × total_frames=${TOTAL_FRAMES} / eff_bs=${EFF_BS} -> STEPS=${STEPS}"
+fi
 
 # --- Build training command ---
 TRAIN_CMD=(
@@ -56,12 +73,15 @@ TRAIN_CMD=(
     --log_freq="${LOG_FREQ}"
     --policy.chunk_size="${CHUNK_SIZE}"
     --policy.n_action_steps="${N_ACTION_STEPS}"
+    --policy.train_expert_only=false
+    --policy.freeze_vision_encoder=false
     --policy.empty_cameras=2
     --rename_map='{"observation.images.rgb": "observation.images.camera1"}'
     --dataset.video_backend=pyav
     --num_workers="${NUM_WORKERS}"
     --seed="${SEED}"
     --output_dir="${OUTPUT_DIR}"
+    --resume="${RESUME}"
     --eval_freq=0
     --policy.push_to_hub=false
     --wandb.enable=true
@@ -69,7 +89,7 @@ TRAIN_CMD=(
 )
 
 # --- Launch ---
-echo "=== SmolVLA Expert-Only (combined sim, 8 datasets merged) ==="
+echo "=== SmolVLA Full Finetune (combined sim) ==="
 echo "Dataset: ${DATASET_REPO}  (~1.2M episodes, ~58M frames)"
 echo "Steps: ${STEPS}, Batch: ${BATCH_SIZE}, GPUs: ${NUM_GPUS}"
 echo "Effective batch: $((BATCH_SIZE * NUM_GPUS))"

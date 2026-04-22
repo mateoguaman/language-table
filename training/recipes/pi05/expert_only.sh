@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# SmolVLA expert-only finetune on language_table_sim_combined (~1.2M eps, ~58M frames).
-# Combined dataset = all 8 sim-only Language Table datasets merged.
-# Target: 4 GPUs (default). Probed ceiling on H200: bs=256+ per GPU at 47.6%
-# VRAM (see docs/batch-size-probes.md) — data loading (pyav video decode) is
-# the bottleneck, not memory. Default bs=128 leaves headroom for NCCL/grad
-# bucketing; raise NUM_WORKERS before pushing batch higher.
+# Pi0.5 expert-only finetune on language_table_sim_combined (~1.2M eps).
+# Freezes SigLIP + PaliGemma backbone, trains only the gemma_expert action
+# head + state/action projections.
+# Target: 4 GPUs. Probed ceiling on H200: bs=16 per GPU at 99.2% VRAM (see
+# docs/batch-size-probes.md) — default bs=12 leaves headroom for NCCL.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,25 +14,21 @@ TRAINING_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 [ -f "${TRAINING_DIR}/.env.user" ] && source "${TRAINING_DIR}/.env.user"
 
 # --- Training parameters ---
-# LeRobot 0.5.1: use --policy.path for pretrained (type is inferred from checkpoint)
-POLICY_PATH="lerobot/smolvla_base"
+POLICY_PATH="lerobot/pi05_base"
 DATASET_REPO="mateoguaman/language_table_sim_combined"
 DATASET_NAME="language_table_sim_combined"
 
-# SmolVLA expert-only bs=128 per GPU measured at ~35 GiB (24.5%) on H200.
-# With 4 GPUs that's an effective batch of 512.
-BATCH_SIZE="${BATCH_SIZE:-128}"
+BATCH_SIZE="${BATCH_SIZE:-12}"
 STEPS="${STEPS:-100000}"
 SAVE_FREQ="${SAVE_FREQ:-10000}"
 LOG_FREQ="${LOG_FREQ:-100}"
 CHUNK_SIZE="${CHUNK_SIZE:-10}"
 N_ACTION_STEPS="${N_ACTION_STEPS:-10}"
-# ~2 workers per cpu-per-gpu (cpus-per-task=32 on 4 GPUs = 8 cpus/GPU).
 NUM_WORKERS="${NUM_WORKERS:-8}"
 SEED="${SEED:-1000}"
 
 # --- Output ---
-JOB_NAME="smolvla_combined_sim"
+JOB_NAME="pi05_expert_combined_sim"
 RUN_ID="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_ROOT:-outputs}/${JOB_NAME}_${RUN_ID}"
 
@@ -47,6 +42,10 @@ fi
 NUM_GPUS="${NUM_GPUS:-4}"
 
 # --- Build training command ---
+# pi0.5 declares image inputs as base_0_rgb / left_wrist_0_rgb / right_wrist_0_rgb
+# (plus empty_camera_{i} from empty_cameras=N). Language Table has one camera —
+# rename rgb → base_0_rgb; wrist cameras stay absent and get zero-masked by
+# _preprocess_images (which only needs ≥1 declared image key in the batch).
 TRAIN_CMD=(
     --policy.path="${POLICY_PATH}"
     ${DATASET_ARGS}
@@ -56,8 +55,10 @@ TRAIN_CMD=(
     --log_freq="${LOG_FREQ}"
     --policy.chunk_size="${CHUNK_SIZE}"
     --policy.n_action_steps="${N_ACTION_STEPS}"
+    --policy.train_expert_only=true
+    --policy.freeze_vision_encoder=true
     --policy.empty_cameras=2
-    --rename_map='{"observation.images.rgb": "observation.images.camera1"}'
+    --rename_map='{"observation.images.rgb": "observation.images.base_0_rgb"}'
     --dataset.video_backend=pyav
     --num_workers="${NUM_WORKERS}"
     --seed="${SEED}"
@@ -69,7 +70,7 @@ TRAIN_CMD=(
 )
 
 # --- Launch ---
-echo "=== SmolVLA Expert-Only (combined sim, 8 datasets merged) ==="
+echo "=== Pi0.5 Expert-Only (combined sim) ==="
 echo "Dataset: ${DATASET_REPO}  (~1.2M episodes, ~58M frames)"
 echo "Steps: ${STEPS}, Batch: ${BATCH_SIZE}, GPUs: ${NUM_GPUS}"
 echo "Effective batch: $((BATCH_SIZE * NUM_GPUS))"
