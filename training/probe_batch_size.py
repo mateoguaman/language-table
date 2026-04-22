@@ -50,53 +50,61 @@ from pathlib import Path
 # We pin each variant explicitly so probes don't silently inherit a default
 # you didn't mean to test.
 #
-# The rename_map + empty_cameras values pad our 1-camera Language Table dataset
-# up to the 3-camera layout all three VLA families expect (primary=camera1,
-# plus two zero-filled empty_camera_{0,1}).
-_VLA_IMAGE_ARGS = [
+# rename_map + empty_cameras pad our 1-camera Language Table dataset up to the
+# multi-camera layouts each VLA family expects. SmolVLA/pi0 use generic
+# camera{1,2,3} naming; pi0.5 uses descriptive names
+# (base_0_rgb / left_wrist_0_rgb / right_wrist_0_rgb). _preprocess_images only
+# requires at least one declared image key to be present in the batch — the
+# rest get zero-filled via the img_mask path.
+_SMOLVLA_IMAGE_ARGS = [
     "--policy.empty_cameras=2",
     '--rename_map={"observation.images.rgb": "observation.images.camera1"}',
+]
+_PI0_IMAGE_ARGS = _SMOLVLA_IMAGE_ARGS
+_PI05_IMAGE_ARGS = [
+    "--policy.empty_cameras=2",
+    '--rename_map={"observation.images.rgb": "observation.images.base_0_rgb"}',
 ]
 
 PRESETS = {
     "smolvla_expert": {
         "policy_path": "lerobot/smolvla_base",
-        "extra": _VLA_IMAGE_ARGS + [
+        "extra": _SMOLVLA_IMAGE_ARGS + [
             "--policy.train_expert_only=true",
             "--policy.freeze_vision_encoder=true",
         ],
     },
     "smolvla_full": {
         "policy_path": "lerobot/smolvla_base",
-        "extra": _VLA_IMAGE_ARGS + [
+        "extra": _SMOLVLA_IMAGE_ARGS + [
             "--policy.train_expert_only=false",
             "--policy.freeze_vision_encoder=false",
         ],
     },
     "pi0_expert": {
         "policy_path": "lerobot/pi0",
-        "extra": _VLA_IMAGE_ARGS + [
+        "extra": _PI0_IMAGE_ARGS + [
             "--policy.train_expert_only=true",
             "--policy.freeze_vision_encoder=true",
         ],
     },
     "pi0_full": {
         "policy_path": "lerobot/pi0",
-        "extra": _VLA_IMAGE_ARGS + [
+        "extra": _PI0_IMAGE_ARGS + [
             "--policy.train_expert_only=false",
             "--policy.freeze_vision_encoder=false",
         ],
     },
     "pi05_expert": {
         "policy_path": "lerobot/pi05_base",
-        "extra": _VLA_IMAGE_ARGS + [
+        "extra": _PI05_IMAGE_ARGS + [
             "--policy.train_expert_only=true",
             "--policy.freeze_vision_encoder=true",
         ],
     },
     "pi05_full": {
         "policy_path": "lerobot/pi05_base",
-        "extra": _VLA_IMAGE_ARGS + [
+        "extra": _PI05_IMAGE_ARGS + [
             "--policy.train_expert_only=false",
             "--policy.freeze_vision_encoder=false",
         ],
