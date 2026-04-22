@@ -12,8 +12,6 @@ PROBE_SLURM="${SCRIPT_DIR}/probe.slurm"
 
 PRESETS="${PRESETS:-smolvla_full pi05_expert pi05_full}"
 
-# Each probe.slurm job refreshes meta/stats.json for the dataset it uses
-# (see probe.slurm). Skip the refresh by exporting SKIP_STATS_PULL=1 below.
 for preset in ${PRESETS}; do
     echo "Submitting probe: ${preset}"
     PRESET="${preset}" sbatch "${PROBE_SLURM}"

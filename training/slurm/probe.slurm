@@ -77,19 +77,6 @@ if [ -d "${DATASET_ROOT}/${DATASET_NAME}" ]; then
     DATASET_ROOT_ARG="--dataset_root ${DATASET_ROOT}/${DATASET_NAME}"
 fi
 
-# Refresh meta/stats.json from the Hub (tiny file, ~KB) so pi0.5 QUANTILES
-# normalization picks up the latest quantile stats. Skip with SKIP_STATS_PULL=1.
-if [ "${SKIP_STATS_PULL:-0}" != "1" ] && [ -d "${DATASET_ROOT}/${DATASET_NAME}" ]; then
-    echo "Refreshing ${DATASET_NAME}/meta/stats.json from ${DATASET_REPO}@v3.0"
-    hf download \
-        --repo-type dataset \
-        --revision v3.0 \
-        --include "meta/stats.json" \
-        --local-dir "${DATASET_ROOT}/${DATASET_NAME}" \
-        "${DATASET_REPO}"
-    echo ""
-fi
-
 echo "============================================"
 echo " Batch-size probe: ${PRESET}"
 echo "============================================"
