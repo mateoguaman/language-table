@@ -64,6 +64,7 @@ TRAIN_CMD=(
     --eval_freq=0
     --policy.push_to_hub=false
     --wandb.enable=true
+    --wandb.disable_artifact=true
     --wandb.project="${WANDB_PROJECT:-language-table-vla}"
 )
 

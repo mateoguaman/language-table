@@ -50,12 +50,14 @@ export NCCL_NSOCKS_PERTHREAD
 export NCCL_TIMEOUT
 export NCCL_DEBUG
 export WANDB_PROJECT
+export WANDB_DIR WANDB_CACHE_DIR WANDB_DATA_DIR WANDB_ARTIFACT_DIR
 
 [ -n "${WANDB_API_KEY:-}" ] && export WANDB_API_KEY
 [ -n "${HF_TOKEN:-}" ] && export HF_TOKEN
 
 # --- Create cache/output directories ---
-mkdir -p "${HF_HOME}" "${HF_LEROBOT_HOME}" "${OUTPUT_ROOT}" "${CHECKPOINT_ROOT}"
+mkdir -p "${HF_HOME}" "${HF_LEROBOT_HOME}" "${OUTPUT_ROOT}" "${CHECKPOINT_ROOT}" \
+         "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_DATA_DIR}" "${WANDB_ARTIFACT_DIR}"
 
 # --- Optional: copy dataset to node-local storage for fast I/O ---
 if [ -n "${TMPDIR:-}" ] && [ -n "${DATASET_ROOT:-}" ] && [ -n "${RECIPE_DATASET_NAME:-}" ]; then
