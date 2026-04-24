@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # SmolVLA full finetune on language_table_sim_combined (~1.2M eps, ~58M frames).
 # Every param trainable: SigLIP vision, SmolLM backbone, action expert, projections.
-# Target: 4 GPUs. Probed ceiling on H200: bs=96 per GPU at 82.3% VRAM
-# (see docs/batch-size-probes.md). bs=128 would extrapolate to ~154 GiB (OOM).
+# Target: 4 GPUs. Probed ceiling on 1×H200: bs=96 at 82.3% VRAM (~115 GiB); bs=128
+# extrapolates to ~154 GiB (OOM). See docs/batch-size-probes.md.
+# DDP overhead: each rank's NCCL peer-to-peer buffers take ~1 GiB on rank 0. At
+# bs=96 with 8 ranks that's ~7-8 GiB extra on GPU 0 → OOM. Rule of thumb:
+#   1-2 GPUs: bs=96   4 GPUs: bs=80   8 GPUs: bs=64
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,8 +67,23 @@ if [ -n "${EPOCHS}" ]; then
 fi
 
 # --- Build training command ---
+# Resume path: LeRobot picks the policy branch iff --policy.path is set; otherwise
+# (--resume=true with --config_path) it rehydrates policy/processors from the saved
+# train_config.json. We pick one or the other based on RESUME.
+if [ "${RESUME}" = "true" ]; then
+    CONFIG_PATH="${OUTPUT_DIR}/checkpoints/last/pretrained_model/train_config.json"
+    if [ ! -f "${CONFIG_PATH}" ]; then
+        echo "ERROR: RESUME=true but ${CONFIG_PATH} not found."
+        echo "       Set OUTPUT_DIR to the run directory that contains checkpoints/last/."
+        exit 1
+    fi
+    POLICY_ARGS=(--config_path="${CONFIG_PATH}")
+else
+    POLICY_ARGS=(--policy.path="${POLICY_PATH}")
+fi
+
 TRAIN_CMD=(
-    --policy.path="${POLICY_PATH}"
+    "${POLICY_ARGS[@]}"
     ${DATASET_ARGS}
     --batch_size="${BATCH_SIZE}"
     --steps="${STEPS}"
