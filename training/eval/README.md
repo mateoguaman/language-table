@@ -7,7 +7,7 @@ What `training/eval/run_benchmark.sh` actually does, in detail.
 ```
 run_benchmark.sh                       (orchestrator; bash)
  ├─ for each CHECKPOINT in CHECKPOINTS:
- │    ├─ if lerobot: spawn lerobot_policy_server.py (PyTorch, lerobot_env_v51)
+ │    ├─ if lerobot: spawn lerobot_policy_server.py (PyTorch, lerobotenv)
  │    │             — TCP bridge so the LeRobot policy can be queried from
  │    │             ltvenv (which runs JAX/PyBullet/tf_agents).
  │    └─ run_eval.py (ltvenv) sweeps the matrix for that one policy.

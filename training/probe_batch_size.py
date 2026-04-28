@@ -15,7 +15,7 @@ a real run actually does.
 Usage (run on a single H200 with CUDA_VISIBLE_DEVICES=0 from an interactive
 shell, after the dataset has been downloaded locally):
 
-    CUDA_VISIBLE_DEVICES=0 ./lerobot_env_v51/bin/python training/probe_batch_size.py \
+    CUDA_VISIBLE_DEVICES=0 ./lerobotenv/bin/python training/probe_batch_size.py \
         --dataset_repo mateoguaman/language_table_sim_combined \
         --dataset_root /media/mateo/Storage/lerobot_datasets_v3/language_table_sim_combined \
         --batch_sizes 16,32,64,96,128,192,256

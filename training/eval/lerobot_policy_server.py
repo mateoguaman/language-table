@@ -176,7 +176,7 @@ class LeRobotPolicyServer:
         """Handle a single client connection. Wire format is a plain dict so
         that client and server don't need to share the dataclass module
         (the client lives in ltvenv with tf_agents; the server lives in
-        lerobot_env_v51 without it)."""
+        lerobotenv without it)."""
         while True:
             request = recv_message(conn)
             method = request.get("method")

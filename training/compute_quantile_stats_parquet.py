@@ -23,7 +23,7 @@ Verification runs automatically after each write:
   - New mean/std within tolerance of the previous stats
 
 Example:
-    ./lerobot_env_v51/bin/python training/compute_quantile_stats_parquet.py \\
+    ./lerobotenv/bin/python training/compute_quantile_stats_parquet.py \\
         --root /media/mateo/Storage/lerobot_datasets_v3 \\
         --namespace mateoguaman \\
         --datasets language_table_blocktoblock_sim

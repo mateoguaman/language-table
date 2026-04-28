@@ -6,7 +6,7 @@ important for the ~48 GB combined sim dataset. Also tags the pushed
 revision as `v3.0` so LeRobot's version resolver finds it.
 
 Usage:
-    ./lerobot_env_v51/bin/python training/push_merged_to_hub.py \
+    ./lerobotenv/bin/python training/push_merged_to_hub.py \
         --local_root /media/mateo/Storage/lerobot_datasets_v3/language_table_sim_combined \
         --repo_id mateoguaman/language_table_sim_combined
 """

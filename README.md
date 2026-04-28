@@ -7,26 +7,20 @@ Language-Table is a suite of human-collected datasets and a multi-task continuou
 
 ## Installation
 
-Installation with [uv](https://docs.astral.sh/uv/). `requirements.txt`
-contains dependencies for running the environment and simple dataset examples.
+See [INSTALLATION.md](./INSTALLATION.md) for the full setup, including the
+LeRobot training environment (`lerobotenv`), HuggingFace auth, and cluster
+bootstrap. Quick version for the simulator and dataset examples:
 
 ```
 uv venv --python 3.10 ./ltvenv
 source ./ltvenv/bin/activate
 uv pip install -r ./requirements.txt
 uv pip install --no-deps git+https://github.com/google-research/scenic.git@ae21d9e884015aa7bc7cf1d489af53d16c249726
-export PYTHONPATH=${PWD}:$PYTHONPATH  # or run echo "export PYTHONPATH=$(pwd):\$PYTHONPATH" >> ~/.bashrc
+export PYTHONPATH=${PWD}:$PYTHONPATH  # or persist via ~/.bashrc
 ```
 
-For running the full train script, install using `requirements_static.txt`, as
-this contains pinned versions for running the full train script.
-
-```
-uv venv --python 3.10 ./ltvenvtrain
-source ./ltvenvtrain/bin/activate
-uv pip install --no-deps -r ./requirements_static.txt
-export PYTHONPATH=${PWD}:$PYTHONPATH
-```
+LeRobot policy training and inference (SmolVLA, π0, ACT, Diffusion) require
+the separate `lerobotenv` (Python 3.12, PyTorch); see `INSTALLATION.md`.
 ## Quickstart
 
 ### Examples
