@@ -31,6 +31,10 @@ JOB_NAME="smolvla_expert_small"
 RUN_ID="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_ROOT:-outputs}/${JOB_NAME}_${RUN_ID}"
 
+# --- HF Hub push ---
+# Requires `huggingface-cli login` (or HF_TOKEN env var) on the training node.
+HF_REPO_ID="${HF_REPO_ID:-mateoguaman/${JOB_NAME}_${RUN_ID}}"
+
 # --- Dataset location ---
 DATASET_ARGS="--dataset.repo_id=${DATASET_REPO}"
 if [ -n "${DATASET_ROOT:-}" ] && [ -d "${DATASET_ROOT}/${DATASET_NAME}" ]; then
@@ -57,10 +61,15 @@ TRAIN_CMD=(
     --seed="${SEED}"
     --output_dir="${OUTPUT_DIR}"
     --eval_freq=0
-    --policy.push_to_hub=false
+    --policy.push_to_hub=true
+    --policy.repo_id="${HF_REPO_ID}"
     --wandb.enable=true
     --wandb.project="${WANDB_PROJECT:-language-table-vla}"
 )
+
+# --- Fail fast if HF push won't work ---
+# shellcheck source=../_check_hf_push.sh
+source "${SCRIPT_DIR}/../_check_hf_push.sh"
 
 # --- Launch ---
 echo "=== SmolVLA Expert-Only (small dataset validation) ==="
