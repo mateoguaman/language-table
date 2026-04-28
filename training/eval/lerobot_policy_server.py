@@ -77,39 +77,75 @@ class LeRobotPolicyServer:
     """Serves a LeRobot policy over TCP."""
 
     def __init__(self, checkpoint_path: str, device: str = "cuda"):
-        from lerobot.policies.pretrained import PreTrainedPolicy
+        import json
+        import os
+        from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 
         print(f"Loading policy from: {checkpoint_path}")
-        self.policy = PreTrainedPolicy.from_pretrained(checkpoint_path)
+        # Resolve HF repo IDs to a local snapshot dir so the rest of the loader
+        # (which reads files directly) works the same as for local checkpoints.
+        if not os.path.isdir(checkpoint_path):
+            from huggingface_hub import snapshot_download
+            print(f"Not a local dir; resolving '{checkpoint_path}' via HF Hub.")
+            checkpoint_path = snapshot_download(repo_id=checkpoint_path)
+            print(f"Snapshot at: {checkpoint_path}")
+
+        # Read policy type from config to dispatch the right concrete class
+        # (PreTrainedPolicy itself is abstract).
+        with open(f"{checkpoint_path}/config.json") as f:
+            policy_type = json.load(f)["type"]
+        policy_cls = get_policy_class(policy_type)
+        self.policy = policy_cls.from_pretrained(checkpoint_path)
         self.policy.to(device)
         self.policy.eval()
         self.device = device
-        print(f"Policy loaded on {device}. Type: {type(self.policy).__name__}")
 
-    def get_action(self, rgb: np.ndarray, state: np.ndarray, instruction: str) -> np.ndarray:
+        # Load the saved preprocessor/postprocessor pipelines. These handle
+        # rename (rgb -> camera1 for SmolVLA), tokenization, normalization,
+        # and device placement. Override device to match this server's GPU.
+        self.preprocessor, self.postprocessor = make_pre_post_processors(
+            policy_cfg=self.policy.config,
+            pretrained_path=checkpoint_path,
+            preprocessor_overrides={
+                "device_processor": {"device": device},
+            },
+        )
+        print(f"Policy loaded on {device}. Type: {type(self.policy).__name__}")
+        print(f"Preprocessor steps: "
+              f"{[type(s).__name__ for s in self.preprocessor.steps]}")
+
+    def get_action(self, rgb, state, instruction: str) -> np.ndarray:
         """Run inference on a single observation.
 
         Args:
-            rgb: uint8 image (H, W, 3)
-            state: float32 end-effector position (2,)
+            rgb: uint8 image as nested list (H, W, 3) or ndarray
+            state: float32 end-effector position as list (2,) or ndarray
             instruction: language instruction text
 
         Returns:
             float32 action (2,)
         """
-        # Convert to LeRobot batch format
-        # Image: (H, W, 3) uint8 -> (1, 3, H, W) float32 [0, 1]
+        # Convert from wire format (lists) back to ndarrays for tensor ops.
+        rgb = np.asarray(rgb, dtype=np.uint8)
+        state = np.asarray(state, dtype=np.float32)
+
+        # Build batch with the dataset's original key names (rgb).
+        # The preprocessor pipeline will rename rgb -> camera1 (or whatever
+        # the saved rename_map specifies), tokenize the task, and normalize.
+        # Image goes in as (1, 3, H, W) float32 [0,1]; state as (1, dim).
         img_tensor = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float() / 255.0
         state_tensor = torch.from_numpy(state).unsqueeze(0).float()
 
         batch = {
-            "observation.images.rgb": img_tensor.to(self.device),
-            "observation.state": state_tensor.to(self.device),
+            "observation.images.rgb": img_tensor,
+            "observation.state": state_tensor,
             "task": instruction,
         }
 
         with torch.no_grad():
+            batch = self.preprocessor(batch)
             action = self.policy.select_action(batch)
+            action = self.postprocessor(action)
 
         return action.cpu().numpy().flatten()[:2]  # Ensure 2D action
 
@@ -137,27 +173,37 @@ class LeRobotPolicyServer:
                 conn.close()
 
     def _handle_client(self, conn: socket.socket):
-        """Handle a single client connection."""
+        """Handle a single client connection. Wire format is a plain dict so
+        that client and server don't need to share the dataclass module
+        (the client lives in ltvenv with tf_agents; the server lives in
+        lerobot_env_v51 without it)."""
         while True:
             request = recv_message(conn)
+            method = request.get("method")
 
-            if request.method == "close":
-                send_message(conn, PolicyResponse(status="ok"))
+            if method == "close":
+                send_message(conn, {"status": "ok"})
                 break
-            elif request.method == "reset":
+            elif method == "reset":
                 self.reset()
-                send_message(conn, PolicyResponse(status="ok"))
-            elif request.method == "action":
+                send_message(conn, {"status": "ok"})
+            elif method == "action":
                 try:
-                    action = self.get_action(request.rgb, request.state, request.instruction)
-                    send_message(conn, PolicyResponse(status="ok", action=action))
+                    action = self.get_action(
+                        request["rgb"], request["state"], request["instruction"])
+                    # Send as plain Python list — client and server have
+                    # different numpy versions, which breaks pickled ndarrays.
+                    send_message(conn, {
+                        "status": "ok", "action": action.tolist()})
                 except Exception as e:
-                    send_message(conn, PolicyResponse(
-                        status="error", error_message=str(e)))
+                    import traceback
+                    traceback.print_exc()
+                    send_message(conn, {
+                        "status": "error", "error_message": str(e)})
             else:
-                send_message(conn, PolicyResponse(
-                    status="error",
-                    error_message=f"Unknown method: {request.method}"))
+                send_message(conn, {
+                    "status": "error",
+                    "error_message": f"Unknown method: {method}"})
 
 
 def main():

@@ -145,21 +145,23 @@ class LeRobotPolicyClient(py_policy.PyPolicy):
         else:
             instruction = str(instruction_raw)
 
-        # Send request
-        request = PolicyRequest(
-            method="action",
-            rgb=rgb,
-            state=state,
-            instruction=instruction,
-        )
+        # Send request as plain dict with arrays as nested lists — client
+        # (numpy 1.x) and server (numpy 2.x) can't unpickle each other's
+        # ndarrays. Lists pickle identically across numpy versions.
+        request = {
+            "method": "action",
+            "rgb": rgb.tolist(),
+            "state": state.tolist(),
+            "instruction": instruction,
+        }
         _send_message(self._sock, request)
 
         # Receive response
         response = _recv_message(self._sock)
-        if response.status != "ok":
-            raise RuntimeError(f"Policy server error: {response.error_message}")
+        if response.get("status") != "ok":
+            raise RuntimeError(f"Policy server error: {response.get('error_message')}")
 
-        action = np.array(response.action, dtype=np.float32)
+        action = np.array(response["action"], dtype=np.float32)
         # Clip to action spec
         action = np.clip(action, self.action_spec.minimum, self.action_spec.maximum)
 
@@ -167,18 +169,16 @@ class LeRobotPolicyClient(py_policy.PyPolicy):
 
     def reset(self):
         """Signal episode reset to the server (clears action chunk state)."""
-        request = PolicyRequest(method="reset")
-        _send_message(self._sock, request)
+        _send_message(self._sock, {"method": "reset"})
         response = _recv_message(self._sock)
-        if response.status != "ok":
-            raise RuntimeError(f"Policy server error on reset: {response.error_message}")
+        if response.get("status") != "ok":
+            raise RuntimeError(f"Policy server error on reset: {response.get('error_message')}")
 
     def close(self):
         """Close connection to the server."""
         if self._sock:
             try:
-                request = PolicyRequest(method="close")
-                _send_message(self._sock, request)
+                _send_message(self._sock, {"method": "close"})
                 _recv_message(self._sock)
             except Exception:
                 pass
