@@ -10,10 +10,11 @@ Follows the two-loop VLA architecture from pybullet_vla/env_manager.py:
 import logging
 import re
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from .custom_task_provider import TaskProvider
 from .frame_annotator import annotate_frames
 from .state_to_text import batch_state_to_text, _decode_instruction
 
@@ -61,9 +62,9 @@ class LanguageTableEnvironmentManager:
         reflection_type="reflection_only",
         vla_policy=None,
         include_rgb=False,
-        split="train",
         frame_subsample=5,
         n_steps=1,
+        custom_task_provider: Optional[TaskProvider] = None,
     ):
         self.envs = envs
         self.num_processes = envs.num_processes
@@ -74,9 +75,9 @@ class LanguageTableEnvironmentManager:
         self.max_inner_steps = max_inner_steps
         self.vla = vla_policy
         self._include_rgb = include_rgb
-        self.split = split
         self._frame_subsample = max(1, frame_subsample)
         self.n_steps = n_steps
+        self._provider = custom_task_provider
 
         # Action space bounds (Language Table uses [-0.1, 0.1]^2)
         self._action_low = -0.1
@@ -95,6 +96,12 @@ class LanguageTableEnvironmentManager:
         self._last_obs_list: List[Dict] = [{} for _ in range(self.num_processes)]
         self._last_goal_strings: List[str] = [""] * self.num_processes
         self._task_strings: List[str] = [""] * self.num_processes
+
+        # Custom-task state: cached per-env instruction strings when a
+        # `custom_task_provider` is active. Generated on reset() only and
+        # reused across restart() / subsequent turns so meta-RL attempts
+        # share the same task within an episode.
+        self._custom_instructions: List[str] = [""] * self.num_processes
 
     def _log_step_failure(
         self,
@@ -148,6 +155,23 @@ class LanguageTableEnvironmentManager:
             return [obs["rgb"] for obs in obs_list]
         return None
 
+    def _apply_custom_instructions(self, text_obs: List[str]) -> List[str]:
+        """Prepend cached custom-task instructions to each env's text obs.
+
+        Used when a `custom_task_provider` is active: the env emits no
+        `instruction` field (reward_factory_cls=None) so `state_to_text`
+        does not produce a "Task: ..." line. We inject it here so
+        downstream prompts still see the task.
+        """
+        if self._provider is None:
+            return text_obs
+        return [
+            f"Task: {self._custom_instructions[i]}\n{text_obs[i]}"
+            if self._custom_instructions[i]
+            else text_obs[i]
+            for i in range(len(text_obs))
+        ]
+
     def reset(self):
         """Reset all envs and return text observations."""
         obs_list, infos = self.envs.reset()
@@ -161,6 +185,20 @@ class LanguageTableEnvironmentManager:
 
         self._last_obs_list = obs_list
         text_obs = batch_state_to_text(obs_list)
+
+        # Custom task provider: generate per-env instructions once per
+        # episode (reset only) and cache. restart() will reuse them.
+        if self._provider is not None:
+            self._custom_instructions = [
+                str(self._provider.instruction(
+                    text_obs[i],
+                    obs_list[i].get("rgb"),
+                    i,
+                ))
+                for i in range(self.num_processes)
+            ]
+            text_obs = self._apply_custom_instructions(text_obs)
+
         self._init_text_obs = text_obs
         self._last_text_obs = text_obs
         self._last_infos = infos
@@ -198,6 +236,8 @@ class LanguageTableEnvironmentManager:
 
         self._last_obs_list = obs_list
         text_obs = batch_state_to_text(obs_list)
+        # Reuse the per-episode custom instructions (generated on reset()).
+        text_obs = self._apply_custom_instructions(text_obs)
         self._last_text_obs = text_obs
         self._last_infos = infos
         self._task_strings = self._extract_task_strings(obs_list)
@@ -396,6 +436,27 @@ class LanguageTableEnvironmentManager:
 
         final_obs = last_obs if last_obs is not None else [{}] * batch
         text_obs = batch_state_to_text(final_obs)
+
+        # Custom reward: replace the env's accumulated per-step rewards
+        # for this turn with the provider's scalar, computed from the
+        # final (text, image) observation. The env is running with
+        # reward_factory_cls=None so total_rewards is zero anyway.
+        if self._provider is not None:
+            if hasattr(self._provider, "precompute_rewards"):
+                image_batch = [
+                    final_obs[i].get("rgb") if isinstance(final_obs[i], dict) else None
+                    for i in range(batch)
+                ]
+                self._provider.precompute_rewards(text_obs, image_batch)
+            for i in range(batch):
+                r = float(self._provider.reward(
+                    text_obs[i],
+                    final_obs[i].get("rgb") if isinstance(final_obs[i], dict) else None,
+                    i,
+                ))
+                total_rewards[i] = r
+            text_obs = self._apply_custom_instructions(text_obs)
+
         self._last_text_obs = text_obs
         self._last_obs_list = final_obs
         self._last_infos = last_infos
@@ -406,16 +467,35 @@ class LanguageTableEnvironmentManager:
             "anchor": text_obs,
         }
 
+        # When a custom provider exposes a `success_threshold`, the env's
+        # built-in done signal is irrelevant (the VLM is the validator):
+        # an episode is a win iff the provider's reward meets the threshold.
+        success_threshold = (
+            getattr(self._provider, "success_threshold", None)
+            if self._provider is not None
+            else None
+        )
+
         for i, info in enumerate(last_infos):
             info["is_action_valid"] = np.array(1.0)
-            info["won"] = bool(final_dones[i])
+            if success_threshold is not None:
+                info["won"] = bool(total_rewards[i] >= success_threshold)
+            else:
+                info["won"] = bool(final_dones[i])
             info["total_reward"] = float(total_rewards[i])
+            # When a custom task provider is active the env emits no
+            # `instruction` field, so `_task_strings[i]` is empty. Fall back
+            # to the provider's cached instruction so the video overlay keeps
+            # showing the real task.
+            task_overlay = self._task_strings[i]
+            if self._provider is not None and self._custom_instructions[i]:
+                task_overlay = self._custom_instructions[i]
             info["frames"] = annotate_frames(
                 all_frames[i],
                 traj_idx=self.curr_traj_idx,
                 turn_idx=self.curr_turn_idx,
                 instruction=goal_strings[i],
-                task=self._task_strings[i],
+                task=task_overlay,
                 reward=float(total_rewards[i]),
             )
             info["language_instruction"] = goal_strings[i]
