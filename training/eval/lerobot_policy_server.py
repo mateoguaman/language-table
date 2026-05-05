@@ -149,6 +149,42 @@ class LeRobotPolicyServer:
 
         return action.cpu().numpy().flatten()[:2]  # Ensure 2D action
 
+    def get_actions(self, rgbs, states, instructions) -> np.ndarray:
+        """Run one batched inference call over multiple observations."""
+        rgb_batch = np.stack(
+            [np.asarray(rgb, dtype=np.uint8) for rgb in rgbs],
+            axis=0,
+        )
+        state_batch = np.stack(
+            [np.asarray(state, dtype=np.float32) for state in states],
+            axis=0,
+        )
+
+        img_tensor = (
+            torch.from_numpy(rgb_batch)
+            .permute(0, 3, 1, 2)
+            .contiguous()
+            .float()
+            / 255.0
+        )
+        state_tensor = torch.from_numpy(state_batch).float()
+
+        batch = {
+            "observation.images.rgb": img_tensor,
+            "observation.state": state_tensor,
+            "task": list(instructions),
+        }
+
+        with torch.no_grad():
+            batch = self.preprocessor(batch)
+            action = self.policy.select_action(batch)
+            action = self.postprocessor(action)
+
+        actions = action.cpu().numpy()
+        if actions.ndim == 1:
+            actions = actions.reshape(1, -1)
+        return actions[:, :2].astype(np.float32)
+
     def reset(self):
         """Reset policy state (for policies with internal state like action chunks)."""
         if hasattr(self.policy, 'reset'):
@@ -195,6 +231,37 @@ class LeRobotPolicyServer:
                     # different numpy versions, which breaks pickled ndarrays.
                     send_message(conn, {
                         "status": "ok", "action": action.tolist()})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    send_message(conn, {
+                        "status": "error", "error_message": str(e)})
+            elif method == "action_batch":
+                try:
+                    active_mask = request.get("active_mask")
+                    rgbs = request["rgbs"]
+                    states = request["states"]
+                    instructions = request["instructions"]
+                    if active_mask is None:
+                        active_mask = [True] * len(instructions)
+                    if not (
+                        len(rgbs) == len(states) == len(instructions) == len(active_mask)
+                    ):
+                        raise ValueError(
+                            "rgbs, states, instructions, and active_mask must have the same length"
+                        )
+
+                    actions = [[0.0, 0.0] for _ in instructions]
+                    active_indices = [i for i, active in enumerate(active_mask) if active]
+                    if active_indices:
+                        active_actions = self.get_actions(
+                            [rgbs[i] for i in active_indices],
+                            [states[i] for i in active_indices],
+                            [instructions[i] for i in active_indices],
+                        )
+                        for idx, action in zip(active_indices, active_actions):
+                            actions[idx] = action.tolist()
+                    send_message(conn, {"status": "ok", "actions": actions})
                 except Exception as e:
                     import traceback
                     traceback.print_exc()

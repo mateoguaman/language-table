@@ -114,3 +114,6 @@ wandb/
 
 # Training secrets
 training/.env.user
+tests
+tmp
+CLAUDE.md
