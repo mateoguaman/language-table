@@ -40,20 +40,23 @@ class SmolVLAPolicy:
                  host="127.0.0.1", port=50100,
                  server_log="/tmp/smolvla_interactive.log",
                  ready_timeout=300.0,
-                 use_batch=True):
+                 use_batch=True,
+                 seed=0):
         self.host, self.port = host, port
         self.proc, self.sock = None, None
         self.use_batch = use_batch
-        self._spawn_server(checkpoint_path, server_log, ready_timeout)
+        self.seed = seed
+        self._spawn_server(checkpoint_path, server_log, ready_timeout, seed)
         self._connect()
         atexit.register(self.close)
 
-    def _spawn_server(self, checkpoint, log_path, timeout):
+    def _spawn_server(self, checkpoint, log_path, timeout, seed):
         log = open(log_path, "w")
         self.proc = subprocess.Popen(
             [LEROBOT_PYTHON, "-u", SERVER_SCRIPT,
              "--checkpoint_path", checkpoint,
-             "--host", self.host, "--port", str(self.port)],
+             "--host", self.host, "--port", str(self.port),
+             "--seed", str(seed)],
             stdout=log, stderr=subprocess.STDOUT,
         )
         deadline = time.time() + timeout
@@ -73,8 +76,10 @@ class SmolVLAPolicy:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.host, self.port))
 
-    def reset(self, num_envs=1):
-        _send(self.sock, {"method": "reset"})
+    def reset(self, num_envs=1, seed=None):
+        if seed is not None:
+            self.seed = seed
+        _send(self.sock, {"method": "reset", "seed": self.seed})
         resp = _recv(self.sock)
         if resp.get("status") != "ok":
             raise RuntimeError(f"reset failed: {resp.get('error_message')}")

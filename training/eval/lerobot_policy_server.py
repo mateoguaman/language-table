@@ -14,6 +14,7 @@ The run_eval.py script (in ltvenv) connects as a client.
 
 import argparse
 import io
+import random
 import pickle
 import socket
 import struct
@@ -76,11 +77,13 @@ class PolicyResponse:
 class LeRobotPolicyServer:
     """Serves a LeRobot policy over TCP."""
 
-    def __init__(self, checkpoint_path: str, device: str = "cuda"):
+    def __init__(self, checkpoint_path: str, device: str = "cuda", seed: int = 0):
         import json
         import os
         from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 
+        self.seed = seed
+        self._seed_everything(seed)
         print(f"Loading policy from: {checkpoint_path}")
         # Resolve HF repo IDs to a local snapshot dir so the rest of the loader
         # (which reads files directly) works the same as for local checkpoints.
@@ -114,6 +117,37 @@ class LeRobotPolicyServer:
         print(f"Preprocessor steps: "
               f"{[type(s).__name__ for s in self.preprocessor.steps]}")
 
+    def _seed_everything(self, seed: int) -> None:
+        """Reset all process-level RNGs used by policy inference."""
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.allow_tf32 = False
+        if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+            torch.backends.cuda.matmul.allow_tf32 = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
+
+    def _zero_action_noise(self, batch_size: int) -> torch.Tensor:
+        """Build deterministic SmolVLA denoising noise in model action space."""
+        chunk_size = getattr(self.policy.config, "chunk_size", 1)
+        action_dim = getattr(
+            self.policy.config,
+            "max_action_dim",
+            getattr(self.policy.config.action_feature, "shape", [2])[-1],
+        )
+        return torch.zeros(
+            batch_size,
+            chunk_size,
+            action_dim,
+            dtype=torch.float32,
+            device=self.device,
+        )
+
     def get_action(self, rgb, state, instruction: str) -> np.ndarray:
         """Run inference on a single observation.
 
@@ -135,6 +169,7 @@ class LeRobotPolicyServer:
         # Image goes in as (1, 3, H, W) float32 [0,1]; state as (1, dim).
         img_tensor = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float() / 255.0
         state_tensor = torch.from_numpy(state).unsqueeze(0).float()
+        noise = self._zero_action_noise(batch_size=1)
 
         batch = {
             "observation.images.rgb": img_tensor,
@@ -144,7 +179,7 @@ class LeRobotPolicyServer:
 
         with torch.no_grad():
             batch = self.preprocessor(batch)
-            action = self.policy.select_action(batch)
+            action = self.policy.select_action(batch, noise=noise)
             action = self.postprocessor(action)
 
         return action.cpu().numpy().flatten()[:2]  # Ensure 2D action
@@ -177,7 +212,8 @@ class LeRobotPolicyServer:
 
         with torch.no_grad():
             batch = self.preprocessor(batch)
-            action = self.policy.select_action(batch)
+            noise = self._zero_action_noise(batch_size=len(instructions))
+            action = self.policy.select_action(batch, noise=noise)
             action = self.postprocessor(action)
 
         actions = action.cpu().numpy()
@@ -185,8 +221,11 @@ class LeRobotPolicyServer:
             actions = actions.reshape(1, -1)
         return actions[:, :2].astype(np.float32)
 
-    def reset(self):
+    def reset(self, seed: int | None = None):
         """Reset policy state (for policies with internal state like action chunks)."""
+        if seed is not None:
+            self.seed = seed
+            self._seed_everything(seed)
         if hasattr(self.policy, 'reset'):
             self.policy.reset()
 
@@ -221,7 +260,7 @@ class LeRobotPolicyServer:
                 send_message(conn, {"status": "ok"})
                 break
             elif method == "reset":
-                self.reset()
+                self.reset(seed=request.get("seed"))
                 send_message(conn, {"status": "ok"})
             elif method == "action":
                 try:
@@ -281,9 +320,11 @@ def main():
     parser.add_argument("--port", type=int, default=50100)
     parser.add_argument("--device", default="cuda",
                         help="Device for inference (cuda or cpu)")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Seed used for deterministic policy inference")
     args = parser.parse_args()
 
-    server = LeRobotPolicyServer(args.checkpoint_path, device=args.device)
+    server = LeRobotPolicyServer(args.checkpoint_path, device=args.device, seed=args.seed)
     server.serve(host=args.host, port=args.port)
 
 
