@@ -34,44 +34,7 @@ VALID_TETROMINOES: List[str] = ["I", "O", "T", "L", "J", "S", "Z"]
 
 
 class CharMatch(BaseModel):
-    match_score: int
-    looks_like_instead: Literal["I", "O", "T", "L", "J", "S", "Z"]
-
-
-# _PROMPT_TEMPLATE = textwrap.dedent("""
-#     <role>
-#     You are a geometry expert specialized in polyominoes.
-#     </role>
-
-#     <task>
-#     Given the following scene description:
-#     {{text_obs}}
-#     Assess how well the blocks are arranged to form the following one-sided tetromino: {{letter}}
-#     </task>
-
-#     <rules>
-#     - Consider all 4 rotations (0, 90, 180, 270) of the shape.
-#     - Return a match score between 0 and 100.
-#     - If the shape does not match {{letter}} but resembles one of the other letters, return the letter it resembles.
-#     </rules>
-
-#     <definitions>
-#     Definitions of One-Sided Tetrominoes:
-#     I: 4 blocks in a straight line.
-#     O: 2x2 square.
-#     T: A 3-block row with 1 block centered above/below it.
-#     L: A 3-block column with 1 block attached to the bottom-right.
-#     J: A 3-block column with 1 block attached to the bottom-left.
-#     S: Two horizontal blocks with two more shifted right on the row above.
-#     Z: Two horizontal blocks with two more shifted left on the row above.
-#     </definitions>
-
-#     Respond in the following JSON format:
-#     {
-#         "match_score": <int between 0 and 100>,
-#         "looks_like_instead": <one of "I", "O", "T", "L", "J", "S", "Z">
-#     }
-# """)
+    looks_like: Literal["I", "O", "T", "L", "J", "S", "Z"]
 
 _PROMPT_TEMPLATE = textwrap.dedent("""
     <role>
@@ -79,14 +42,13 @@ _PROMPT_TEMPLATE = textwrap.dedent("""
     </role>
 
     <task>
-    Given the following scene description:
-    {{text_obs}}
-    Assess how well the blocks are arranged to form the following one-sided tetromino: {{letter}}
+    Look at the top-down RGB image of a table with colored blocks. List all the blocks in the image.
+    Assess how well the blocks are arranged to form the one-sided tetromino '{{letter}}' when connected with edges.
     </task>
 
     <rules>
-    - Return a match score between 0 (no match) and 100 (perfect match).
-    - If the shape does not match {{letter}} but resembles one of the other letters, return the letter it resembles.
+    - Account for 0, 90, 180, or 270 degrees rotation of the shape.
+    - If the shape does not match '{{letter}}', return the letter it resembles instead.
     </rules>
 
     <definitions>
@@ -101,42 +63,36 @@ _PROMPT_TEMPLATE = textwrap.dedent("""
     </definitions>
 
     Respond in the following JSON format:
-    {
-        "match_score": <int between 0 (no match) and 100 (perfect match)>,
-        "looks_like_instead": <one of "I", "O", "T", "L", "J", "S", "Z">
-    }
+    {{
+        "looks_like": <one of "I", "O", "T", "L", "J", "S", "Z">
+    }}
 """)
 
 
-def _build_prompt(letter: str, text_obs: str) -> str:
-
-    # remove end-effector information - might work w/o but this way is cleaner
-    text_obs_clean = text_obs.split("Blocks:")[-1]
-    prompt = _PROMPT_TEMPLATE
-    prompt = prompt.replace("{{letter}}", letter)
-    prompt = prompt.replace("{{text_obs}}", text_obs_clean)
-    return prompt
+def _build_prompt(letter: str) -> str:
+    return _PROMPT_TEMPLATE.replace("{{letter}}", letter)
 
 
 async def _score_async(
     letter: str,
-    text_obs: str,
+    image: Optional[np.ndarray],
     model: str,
     timeout: float,
     max_retries: int = 5,
 ) -> Optional[CharMatch]:
-    """Call Gemini to score how well ``text_obs`` forms a ``letter`` tetromino.
+    """Call Gemini to score how well ``image`` forms a ``letter`` tetromino.
 
     Mirrors the retry pattern in ``gemini_policy.GeminiPolicy.translate_async``:
     up to ``max_retries`` attempts, each with its own ``timeout``. Returns
     ``None`` if all attempts fail (caller decides how to handle missing rewards).
     """
-    prompt = _build_prompt(letter, text_obs)
+    prompt = _build_prompt(letter)
 
     for attempt in range(1, max_retries + 1):
         try:
             raw = await _call_gemini_async(
                 prompt, model_id=model, timeout=timeout,
+                thinking_level="MEDIUM", image=image,
             )
             data = json.loads(raw)
             return CharMatch(**data)
@@ -197,9 +153,8 @@ class TetrisTaskProvider(TaskProvider):
     Notes
     -----
     The Gemini API key is read from ``GOOGLE_API_KEY`` inside
-    ``gemini_policy._call_gemini_async``. ``thinking_level`` is hardcoded
-    to ``"LOW"`` there as well; we deliberately follow that working policy
-    to avoid drift.
+    ``gemini_policy._call_gemini_async``. Verifier uses ``thinking_level="MEDIUM"``
+    and scores via image input (looks_like == letter → 100, else 0).
     """
 
     def __init__(
@@ -211,6 +166,7 @@ class TetrisTaskProvider(TaskProvider):
         group_n: int = 1,
         timeout: float = 60.0,
         success_threshold: float = 100.0,
+        dummy_zero_reward: bool = False,
     ) -> None:
         if shapes is None:
             shapes = list(VALID_TETROMINOES)
@@ -227,7 +183,7 @@ class TetrisTaskProvider(TaskProvider):
         if group_n < 1:
             raise ValueError(f"group_n must be >= 1, got {group_n}.")
 
-        if not os.environ.get("GOOGLE_API_KEY"):
+        if not dummy_zero_reward and not os.environ.get("GOOGLE_API_KEY"):
             raise RuntimeError(
                 "GOOGLE_API_KEY env var is not set. "
                 "Set it in .env.language_table.secrets or export it."
@@ -240,6 +196,7 @@ class TetrisTaskProvider(TaskProvider):
         self._group_n = int(group_n)
         self._rng = np.random.default_rng(seed)
         self.success_threshold = float(success_threshold)
+        self._dummy_zero_reward = bool(dummy_zero_reward)
 
         self._env_shape: Dict[int, str] = {}
         self._group_shape: Dict[int, str] = {}
@@ -286,14 +243,14 @@ class TetrisTaskProvider(TaskProvider):
                 continue
             call_indices.append(i)
 
-        if not call_indices:
+        if not call_indices or self._dummy_zero_reward:
             return
 
         async def _run() -> List[Any]:
             tasks = [
                 _score_async(
                     letter=self._env_shape[i],
-                    text_obs=text_obs_batch[i],
+                    image=image_batch[i] if image_batch is not None else None,
                     model=self._model,
                     timeout=self._timeout,
                 )
@@ -317,11 +274,13 @@ class TetrisTaskProvider(TaskProvider):
                 # _score_async returned None after exhausting retries; leave
                 # reward at the default 0.0 and don't populate details.
                 continue
-            self._cached_rewards[i] = float(res.match_score)
+            letter = self._env_shape[i]
+            score = 100.0 if res.looks_like == letter else 0.0
+            self._cached_rewards[i] = score
             self._last_details[i] = {
-                "letter": self._env_shape[i],
-                "match_score": int(res.match_score),
-                "looks_like_instead": res.looks_like_instead,
+                "letter": letter,
+                "looks_like": res.looks_like,
+                "score": int(score),
             }
 
             logger.info("PREDICTION" + str(self._last_details[i]) + text_obs_batch[i] + "\n\n")

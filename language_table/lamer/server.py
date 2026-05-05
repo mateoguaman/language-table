@@ -37,6 +37,7 @@ _ALLOWED_METHODS = frozenset({
     "success_evaluator",
     "close",
     "build_text_obs",
+    "render",
 })
 
 _TIMED_METHODS = frozenset({"reset", "step", "restart", "reflect"})

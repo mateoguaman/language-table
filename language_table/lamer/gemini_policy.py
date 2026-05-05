@@ -65,6 +65,8 @@ async def _call_gemini_async(
     prompt: str,
     model_id: str = "gemini-3.1-flash-lite-preview",
     timeout: float = 30.0,
+    thinking_level: str = "LOW",
+    image: Optional[np.ndarray] = None,
 ) -> str:
     """Call the Gemini API and return the raw response text.
 
@@ -78,16 +80,27 @@ async def _call_gemini_async(
             "Set it in .env.language_table.secrets or export it."
         )
 
+    if image is not None:
+        import io
+        from PIL import Image as PILImage
+        pil_img = PILImage.fromarray(image.astype(np.uint8))
+        buf = io.BytesIO()
+        pil_img.save(buf, format="PNG")
+        image_part = types.Part.from_bytes(data=buf.getvalue(), mime_type="image/png")
+        contents = [image_part, prompt]
+    else:
+        contents = [prompt]
+
     client = genai.Client(api_key=api_key)
     response = await asyncio.wait_for(
         client.aio.models.generate_content(
             model=model_id,
-            contents=[prompt],
+            contents=contents,
             config=types.GenerateContentConfig(
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
                     disable=True
                 ),
-                thinking_config=types.ThinkingConfig(thinking_level="LOW", include_thoughts=False),
+                thinking_config=types.ThinkingConfig(thinking_level=thinking_level, include_thoughts=False),
                 response_mime_type="application/json",
             ),
         ),

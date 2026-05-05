@@ -130,6 +130,23 @@ def _load_vla_policy(checkpoint_path, preprocess_mode="original"):
     return policy
 
 
+def _load_smolvla_policy(checkpoint_path, smolvla_port=50100, n_action_steps=1):
+    """Load a SmolVLA policy (spawns a subprocess policy server)."""
+    from language_table.policies.smolvla import SmolVLAPolicy
+
+    logger.info(
+        "Loading SmolVLA policy from %s (server port=%d, n_action_steps=%d)",
+        checkpoint_path, smolvla_port, n_action_steps,
+    )
+    policy = SmolVLAPolicy(
+        checkpoint_path=checkpoint_path,
+        port=smolvla_port,
+        n_action_steps=n_action_steps,
+    )
+    logger.info("SmolVLA policy loaded successfully.")
+    return policy
+
+
 def _create_env_pool(num_envs, group_n, block_mode, reward_factory_cls,
                      seed, render_obs, return_full_state):
     """Create a Ray-parallelized environment pool."""
@@ -234,8 +251,11 @@ def _run_single(args):
 
     vla_policy = None
     if args.vla_checkpoint:
-        vla_policy = _load_vla_policy(
-            args.vla_checkpoint, args.preprocess_mode)
+        if args.policy == "smolvla":
+            vla_policy = _load_smolvla_policy(
+                args.vla_checkpoint, args.smolvla_port, args.smolvla_n_action_steps)
+        else:
+            vla_policy = _load_vla_policy(args.vla_checkpoint, args.preprocess_mode)
 
     manager = _create_manager(
         envs, args, vla_policy, args.split, args.group_n,
@@ -268,8 +288,11 @@ def _run_unified(args):
     # Load one shared VLA model
     vla_policy = None
     if args.vla_checkpoint:
-        vla_policy = _load_vla_policy(
-            args.vla_checkpoint, args.preprocess_mode)
+        if args.policy == "smolvla":
+            vla_policy = _load_smolvla_policy(
+                args.vla_checkpoint, args.smolvla_port, args.smolvla_n_action_steps)
+        else:
+            vla_policy = _load_vla_policy(args.vla_checkpoint, args.preprocess_mode)
 
     # Create train env pool
     logger.info(
@@ -365,8 +388,14 @@ def main():
                         choices=["original", "batched_tf", "jax_gpu"],
                         help="Image preprocessing strategy for LAVA _build_batch")
     parser.add_argument("--policy", type=str, default="lava",
-                        choices=["lava", "gemini"])
+                        choices=["lava", "gemini", "smolvla"])
     parser.add_argument("--gemini_timeout", type=float, default=30.0)
+    parser.add_argument("--smolvla_port", type=int, default=50100,
+                        help="TCP port for the SmolVLA policy subprocess server.")
+    parser.add_argument("--smolvla_n_action_steps", type=int, default=1,
+                        help="Number of consecutive actions the SmolVLA server "
+                             "returns per request (must be <= policy action_chunk_size). "
+                             "The client buffers them and executes one per env step.")
 
     # Single-pool mode args
     parser.add_argument("--port", type=int, default=50051)

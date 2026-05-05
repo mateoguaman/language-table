@@ -193,6 +193,10 @@ class LanguageTableEnvironmentManager:
             return self._build_reflect_prompt()
         return self._last_text_obs
 
+    def render(self):
+        """RGB frames from each worker (``env.render(mode='rgb_array')``)."""
+        return self.envs.render()
+
     def close(self):
         self.envs.close()
 

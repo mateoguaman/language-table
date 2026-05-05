@@ -302,6 +302,10 @@ class LanguageTableEnvironmentManager:
             return self._build_reflect_prompt()
         return self._last_text_obs
 
+    def render(self):
+        """RGB frames from each worker (``env.render(mode='rgb_array')``)."""
+        return self.envs.render()
+
     def close(self):
         """Close all envs."""
         self.envs.close()
@@ -344,9 +348,6 @@ class LanguageTableEnvironmentManager:
 
         for inner_step in range(self.max_inner_steps):
             if self.vla is not None:
-                # Batched VLA inference: the LLM's goal strings condition the
-                # policy, and RGB images from each env are preprocessed and
-                # fed through the LAVA model in a single forward pass.
                 actions = self.vla.predict(goal_strings, obs_list_for_vla, active_mask)
             else:
                 # Random actions fallback (no VLA loaded)
@@ -465,6 +466,7 @@ class LanguageTableEnvironmentManager:
             "text": text_obs,
             "image": self._extract_images(final_obs),
             "anchor": text_obs,
+            "state": final_obs,
         }
 
         # When a custom provider exposes a `success_threshold`, the env's
