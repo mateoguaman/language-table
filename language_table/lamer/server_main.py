@@ -15,7 +15,7 @@ Supports two modes:
         --val_num_envs 128 --val_group_n 1
 
    In unified mode, a single process serves both train and val on
-   separate TCP ports, sharing one LAVA model on one GPU with
+   separate TCP ports, sharing one VLA model on one GPU with
    MEM_FRACTION=0.9. Since the PPO loop is sequential (rollout then
    validate), there is no concurrent GPU memory contention.
 """
@@ -30,6 +30,8 @@ from language_table.environments.rewards.block2relativelocation import BlockToRe
 from language_table.environments.rewards.block2block_relative_location import BlockToBlockRelativeLocationReward
 from language_table.environments.rewards.point2block import PointToBlockReward
 from language_table.environments.rewards.separate_blocks import SeparateBlocksReward
+from language_table.environments.rewards.tetris_shape import TetrisShapeReward
+from language_table.lamer.smolvla_policy import SmolVLAPolicy
 from language_table.environments.rewards.multistep_block_to_location import (
     make_multistep_reward,
 )
@@ -43,6 +45,7 @@ REWARD_TYPES = {
     "block2block_relative_location": BlockToBlockRelativeLocationReward,
     "point2block": PointToBlockReward,
     "separate_blocks": SeparateBlocksReward,
+    "tetris_shape": TetrisShapeReward,
     "multistep": None,
     "none": None,
 }
@@ -70,6 +73,11 @@ def _load_vla_policy(checkpoint_path, preprocess_mode="original"):
     logger.info("LAVA policy loaded successfully.")
     return policy
 
+def _load_smolvla_policy(checkpoint_path):
+    logger.info("Loading SmolVLA policy from %s", checkpoint_path)
+    policy = SmolVLAPolicy(checkpoint_path=checkpoint_path)
+    logger.info("SmolVLA policy loaded successfully.")
+    return policy
 
 def _create_env_pool(num_envs, group_n, block_mode, reward_factory_cls,
                      seed, render_obs, return_full_state):
@@ -88,7 +96,7 @@ def _create_env_pool(num_envs, group_n, block_mode, reward_factory_cls,
 
 
 def _create_manager(envs, args, vla_policy, split, group_n):
-    """Create an environment manager (LAVA or Gemini)."""
+    """Create an environment manager for the selected policy."""
     if args.policy == "gemini":
         from .gemini_policy import GeminiPolicy
         from .gemini_env_manager import LanguageTableEnvironmentManager
@@ -107,7 +115,10 @@ def _create_manager(envs, args, vla_policy, split, group_n):
             include_rgb=args.include_rgb,
         )
     else:
-        from .lava_env_manager import LanguageTableEnvironmentManager
+        if args.policy == "smolvla":
+            from .smol_vla_env_manager import LanguageTableEnvironmentManager
+        else:
+            from .lava_env_manager import LanguageTableEnvironmentManager
 
         n_steps = getattr(args, 'task_n_steps', 1)
         return LanguageTableEnvironmentManager(
@@ -171,8 +182,11 @@ def _run_single(args):
 
     vla_policy = None
     if args.vla_checkpoint:
-        vla_policy = _load_vla_policy(
-            args.vla_checkpoint, args.preprocess_mode)
+        if args.policy == "smolvla":
+            vla_policy = _load_smolvla_policy(args.vla_checkpoint)
+        elif args.policy == "lava":
+            vla_policy = _load_vla_policy(
+                args.vla_checkpoint, args.preprocess_mode)
 
     manager = _create_manager(envs, args, vla_policy, args.split, args.group_n)
 
@@ -212,8 +226,11 @@ def _run_unified(args):
     # Load one shared VLA model
     vla_policy = None
     if args.vla_checkpoint:
-        vla_policy = _load_vla_policy(
-            args.vla_checkpoint, args.preprocess_mode)
+        if args.policy == "smolvla":
+            vla_policy = _load_smolvla_policy(args.vla_checkpoint)
+        elif args.policy == "lava":
+            vla_policy = _load_vla_policy(
+                args.vla_checkpoint, args.preprocess_mode)
 
     # Create train env pool
     logger.info(
@@ -299,7 +316,7 @@ def main():
                         choices=["original", "batched_tf", "jax_gpu", "jax_fused"],
                         help="Image preprocessing strategy for LAVA _build_batch")
     parser.add_argument("--policy", type=str, default="lava",
-                        choices=["lava", "gemini"])
+                        choices=["lava", "smolvla", "gemini"])
     parser.add_argument("--gemini_timeout", type=float, default=30.0)
     parser.add_argument("--benchmark_timing", action="store_true",
                         help="Attach structured timing metadata to env responses.")

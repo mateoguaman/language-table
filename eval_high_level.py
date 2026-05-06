@@ -4,7 +4,7 @@ import argparse
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from language_table.environments import blocks, language_table
-from language_table.environments.rewards import block2absolutelocation
+from language_table.environments.rewards import tetris_shape
 from tf_agents.environments import gym_wrapper
 from tf_agents.trajectories import time_step as ts
 from language_table.lamer.lava_policy import LAVAPolicy
@@ -124,7 +124,7 @@ Task:
 {task}"""
 
 block_mode = blocks.LanguageTableBlockVariants.BLOCK_4
-reward_factory = block2absolutelocation.BlockToAbsoluteLocationReward
+reward_factory = tetris_shape.TetrisShapeReward
 
 env = language_table.LanguageTable(
     block_mode=block_mode,
