@@ -2,7 +2,7 @@ import atexit, pickle, socket, struct, subprocess, time
 import os
 import numpy as np
 
-tillicum = False
+tillicum = os.environ.get("TILLICUM", False)
 
 if tillicum:
     REPO = "/gpfs/projects/stf/sidhraja/projects/language-table"
