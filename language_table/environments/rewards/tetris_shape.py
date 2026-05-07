@@ -145,7 +145,7 @@ def blocks_to_3x3_array(state, blocks_on_table):
 
 def generate_all_instructions(block_mode):
   """Generate all instructions for block2relativeposition."""
-  all_instructions = ["make a tetris T shape out of the blocks"]
+  all_instructions = ["arrange the blocks into the tetris/tetromino shape: T"]
 
   return all_instructions
 
@@ -170,7 +170,7 @@ class TetrisShapeReward(base_reward.LanguageTableReward):
       self, block, blocks_on_table, location):
     """Randomly sample a task involving two objects."""
     
-    return "make a tetris T shape out of the blocks"
+    return "arrange the blocks into the tetris/tetromino shape: T"
 
   def reset(self, state, blocks_on_table):
     """Chooses new target block and location."""
