@@ -73,9 +73,9 @@ def _load_vla_policy(checkpoint_path, preprocess_mode="original"):
     logger.info("LAVA policy loaded successfully.")
     return policy
 
-def _load_smolvla_policy(checkpoint_path):
+def _load_smolvla_policy(checkpoint_path, port):
     logger.info("Loading SmolVLA policy from %s", checkpoint_path)
-    policy = SmolVLAPolicy(checkpoint_path=checkpoint_path)
+    policy = SmolVLAPolicy(checkpoint_path=checkpoint_path, port=port)
     logger.info("SmolVLA policy loaded successfully.")
     return policy
 
@@ -183,7 +183,7 @@ def _run_single(args):
     vla_policy = None
     if args.vla_checkpoint:
         if args.policy == "smolvla":
-            vla_policy = _load_smolvla_policy(args.vla_checkpoint)
+            vla_policy = _load_smolvla_policy(args.vla_checkpoint, args.port+100)
         elif args.policy == "lava":
             vla_policy = _load_vla_policy(
                 args.vla_checkpoint, args.preprocess_mode)
@@ -227,7 +227,7 @@ def _run_unified(args):
     vla_policy = None
     if args.vla_checkpoint:
         if args.policy == "smolvla":
-            vla_policy = _load_smolvla_policy(args.vla_checkpoint)
+            vla_policy = _load_smolvla_policy(args.vla_checkpoint, args.port+100)
         elif args.policy == "lava":
             vla_policy = _load_vla_policy(
                 args.vla_checkpoint, args.preprocess_mode)
