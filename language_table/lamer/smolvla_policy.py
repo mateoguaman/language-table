@@ -44,7 +44,7 @@ def _recv(sock):
 class SmolVLAPolicy:
     def __init__(self, checkpoint_path,
                  host="127.0.0.1", port=50100,
-                 server_log="/tmp/smolvla_interactive.log",
+                 server_log=None,
                  ready_timeout=300.0,
                  use_batch=True,
                  seed=0):
@@ -52,6 +52,9 @@ class SmolVLAPolicy:
         self.proc, self.sock = None, None
         self.use_batch = use_batch
         self.seed = seed
+        if server_log is None:
+            job_id = os.environ.get("SLURM_JOB_ID", "local")
+            server_log = f"/tmp/smolvla_interactive_{job_id}_{os.getpid()}_{port}.log"
         self._spawn_server(checkpoint_path, server_log, ready_timeout, seed)
         self._connect()
         atexit.register(self.close)
