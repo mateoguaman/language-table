@@ -19,6 +19,7 @@ local imports adjusted.
 """
 
 import logging
+import os
 import select
 import socket
 import time
@@ -40,6 +41,20 @@ _ALLOWED_METHODS = frozenset({
 })
 
 _TIMED_METHODS = frozenset({"reset", "step", "restart", "reflect"})
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %.1fs", name, value, default)
+        return default
+
+
+_SOCKET_TIMEOUT_S = _env_float("LAMER_ENV_SERVER_TIMEOUT_S", 1200.0)
 
 
 class EnvServer:
@@ -87,17 +102,23 @@ class EnvServer:
     def _handle_connection(self, conn: socket.socket):
         """Process requests from a single client until it disconnects or
         sends a ``close`` request."""
-        # detect dead clients instead of blocking forever
-        # keep this at 600 to ensure initial evaluation doesn't kill the server
-        conn.settimeout(600)
+        # Detect dead clients instead of blocking forever.
+        conn.settimeout(_SOCKET_TIMEOUT_S)
         while True:
             try:
                 request: EnvRequest = recv_message(conn)
             except socket.timeout:
-                logger.warning("Client idle for 600s — dropping connection")
+                logger.warning(
+                    "Client idle for %.0fs — dropping connection",
+                    _SOCKET_TIMEOUT_S,
+                )
                 break
             response = self._dispatch(request)
-            send_message(conn, response)
+            try:
+                send_message(conn, response)
+            except (ConnectionError, OSError, TimeoutError, BrokenPipeError) as exc:
+                logger.warning("Failed to send response; dropping client: %s", exc)
+                break
             if request.method == "close":
                 break
 
@@ -222,15 +243,23 @@ class MultiPoolEnvServer:
         return srv
 
     def _handle_connection(self, conn, manager, label):
-        conn.settimeout(600)
+        conn.settimeout(_SOCKET_TIMEOUT_S)
         while True:
             try:
                 request: EnvRequest = recv_message(conn)
             except socket.timeout:
-                logger.warning("[%s] Client idle for 600s — dropping", label)
+                logger.warning(
+                    "[%s] Client idle for %.0fs — dropping",
+                    label,
+                    _SOCKET_TIMEOUT_S,
+                )
                 break
             response = self._dispatch(request, manager, label)
-            send_message(conn, response)
+            try:
+                send_message(conn, response)
+            except (ConnectionError, OSError, TimeoutError, BrokenPipeError) as exc:
+                logger.warning("[%s] Failed to send response; dropping client: %s", label, exc)
+                break
             if request.method == "close":
                 break
 
