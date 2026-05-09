@@ -114,11 +114,7 @@ class EnvServer:
                 )
                 break
             response = self._dispatch(request)
-            try:
-                send_message(conn, response)
-            except (ConnectionError, OSError, TimeoutError, BrokenPipeError) as exc:
-                logger.warning("Failed to send response; dropping client: %s", exc)
-                break
+            send_message(conn, response)
             if request.method == "close":
                 break
 
@@ -255,11 +251,7 @@ class MultiPoolEnvServer:
                 )
                 break
             response = self._dispatch(request, manager, label)
-            try:
-                send_message(conn, response)
-            except (ConnectionError, OSError, TimeoutError, BrokenPipeError) as exc:
-                logger.warning("[%s] Failed to send response; dropping client: %s", label, exc)
-                break
+            send_message(conn, response)
             if request.method == "close":
                 break
 
