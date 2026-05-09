@@ -342,6 +342,8 @@ class LanguageTableEnvironmentManager:
         last_obs = None
         last_infos = [{} for _ in range(batch)]
         self._last_goal_strings = list(goal_strings)
+        for i, (raw, cleaned) in enumerate(zip(raw_strings, goal_strings)):
+            logger.info("VLA goal env=%d | raw=%r | cleaned=%r", i, raw[:200], cleaned[:200])
 
         all_frames = [[] for _ in range(batch)]
         all_frame_rewards = [[] for _ in range(batch)]

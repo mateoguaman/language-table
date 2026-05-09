@@ -8,6 +8,7 @@ Follows the two-loop VLA architecture from pybullet_vla/env_manager.py:
 """
 
 import logging
+import os
 import re
 import time
 from collections import defaultdict
@@ -79,6 +80,15 @@ class LanguageTableEnvironmentManager:
         self._include_rgb = include_rgb
         self.split = split
         self._frame_subsample = max(1, frame_subsample)
+        max_video_envs = int(os.environ.get("LAMER_MAX_VIDEO_ENVS", "8"))
+        group_n = max(1, int(getattr(envs, "group_n", 1)))
+        self._video_env_indices = set(
+            range(0, self.num_processes, group_n)
+        )
+        if max_video_envs >= 0:
+            self._video_env_indices = set(
+                sorted(self._video_env_indices)[:max_video_envs]
+            )
         self.n_steps = n_steps
         self._benchmark_timing = benchmark_timing
         self._benchmark_trace_inner_steps = benchmark_trace_inner_steps
@@ -374,7 +384,7 @@ class LanguageTableEnvironmentManager:
         all_frames = [[] for _ in range(batch)]
         all_frame_rewards = [[] for _ in range(batch)]
         for i in range(batch):
-            if "rgb" in self._last_obs_list[i]:
+            if i in self._video_env_indices and "rgb" in self._last_obs_list[i]:
                 all_frames[i].append(self._last_obs_list[i]["rgb"].copy())
                 all_frame_rewards[i].append(0.0)
 
@@ -469,7 +479,11 @@ class LanguageTableEnvironmentManager:
 
             if (inner_step + 1) % self._frame_subsample == 0:
                 for i in range(batch):
-                    if active_mask[i] and "rgb" in obs_list[i]:
+                    if (
+                        i in self._video_env_indices
+                        and active_mask[i]
+                        and "rgb" in obs_list[i]
+                    ):
                         all_frames[i].append(obs_list[i]["rgb"].copy())
                         all_frame_rewards[i].append(float(last_rewards[i]))
 
