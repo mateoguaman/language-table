@@ -109,4 +109,6 @@ wandb/
 # Ray
 /tmp/ray/
 
+# OPRO
 2026*/
+opro/models/secret.py
