@@ -7,16 +7,24 @@ Input: obs dict from LanguageTable.step() containing:
     - block_*_translation (2,) for each block
     - block_*_mask (1,) for each block (1.0 = present on table)
 
+Block positions use ``normalize_workspace_xy`` (``language_table.environments.workspace_xy``):
+    xn = (x - X_MIN) / (X_MAX - X_MIN)   board top→bottom / camera ~top→bottom
+    yn = (Y_MAX - y) / (Y_MAX - Y_MIN)   board right→left / camera ~right→left
+
 Output example:
     Task: push the red star to the blue cube
-    End-effector: (0.350, -0.120)
-    Blocks: red_star (0.42, -0.15), blue_cube (0.30, 0.20), green_moon (0.55, 0.10)
+    End-effector: x=0.500, y=0.250
+    Block positions (normalized [0,1]):
+      red_star: x=0.600, y=0.350
+      blue_cube: x=0.333, y=0.750
 """
 
 import re
 from typing import Any, Dict, List
 
 import numpy as np
+
+from language_table.environments.workspace_xy import normalize_workspace_xy
 
 
 def _decode_instruction(instruction_array) -> str:
@@ -41,13 +49,14 @@ def state_to_text(obs: Dict[str, Any]) -> str:
         if task_str:
             parts.append(f"Task: {task_str}")
 
-    # End-effector position
+    # End-effector position (normalized)
     ee = obs.get("effector_translation")
     if ee is not None:
-        parts.append(f"End-effector: ({ee[0]:.3f}, {ee[1]:.3f})")
+        xn, yn = normalize_workspace_xy(float(ee[0]), float(ee[1]))
+        parts.append(f"End-effector: x={xn:.3f}, y={yn:.3f}")
 
-    # Blocks present on the table
-    block_entries = []
+    # Blocks present on the table (normalized)
+    block_lines = []
     for key in sorted(obs.keys()):
         m = re.match(r"block_(.+)_translation$", key)
         if m:
@@ -57,10 +66,11 @@ def state_to_text(obs: Dict[str, Any]) -> str:
             if mask is not None and float(mask[0]) < 0.5:
                 continue  # block not on table
             pos = obs[key]
-            block_entries.append(f"{block_name} ({pos[0]:.3f}, {pos[1]:.3f})")
+            xn, yn = normalize_workspace_xy(float(pos[0]), float(pos[1]))
+            block_lines.append(f"  {block_name}: x={xn:.3f}, y={yn:.3f}")
 
-    if block_entries:
-        parts.append("Blocks: " + ", ".join(block_entries))
+    if block_lines:
+        parts.append("Block positions (normalized [0,1]):\n" + "\n".join(block_lines))
 
     return "\n".join(parts) if parts else "No observation available."
 

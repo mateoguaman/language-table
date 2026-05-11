@@ -8,6 +8,8 @@ Supports two modes:
         --host 0.0.0.0 --port 50051 --num_envs 8 --split train \
         --reward_type multistep \
         --reward_kwargs '{"locations":["top_left"],"shapes":["moon"],"n_steps":2}'
+    # SmolVLA policy server defaults to --port + 50  (here: 50101).
+    # Pass --smolvla_port to override.
 
 2. Unified two-pool (shared VLA model, two ports):
     ltvenv/bin/python -m language_table.lamer.server_main \
@@ -163,6 +165,18 @@ def _create_env_pool(num_envs, group_n, block_mode, reward_factory_cls,
     )
 
 
+def _resolve_chunk_size(args) -> int:
+    """Resolve effective chunk_size for the chosen policy."""
+    if args.policy == "lava":
+        if args.chunk_size != 1:
+            logger.warning(
+                "chunk_size=%d ignored for policy=lava; forcing chunk_size=1",
+                args.chunk_size,
+            )
+        return 1
+    return args.chunk_size
+
+
 def _create_manager(
     envs,
     args,
@@ -171,6 +185,7 @@ def _create_manager(
     group_n,
     reward_type: str,
     reward_kwargs: Dict[str, Any],
+    chunk_size: int = 1,
 ):
     """Create an environment manager (LAVA or Gemini)."""
     if args.policy == "gemini":
@@ -215,6 +230,7 @@ def _create_manager(
         include_rgb=args.include_rgb,
         n_steps=n_steps,
         custom_task_provider=custom_task_provider,
+        chunk_size=chunk_size,
     )
 
 
@@ -233,6 +249,7 @@ def _run_single(args):
             args.reward_type, args.reward_kwargs,
         )
 
+    chunk_size = _resolve_chunk_size(args)
     render_obs = not args.no_render or args.vla_checkpoint is not None
 
     envs = LanguageTableMultiProcessEnv(
@@ -253,13 +270,14 @@ def _run_single(args):
     if args.vla_checkpoint:
         if args.policy == "smolvla":
             vla_policy = _load_smolvla_policy(
-                args.vla_checkpoint, args.smolvla_port, args.smolvla_n_action_steps)
+                args.vla_checkpoint, args.smolvla_port, chunk_size)
         else:
             vla_policy = _load_vla_policy(args.vla_checkpoint, args.preprocess_mode)
 
     manager = _create_manager(
         envs, args, vla_policy, args.split, args.group_n,
         args.reward_type, reward_kwargs,
+        chunk_size=chunk_size,
     )
 
     server = EnvServer(manager, host=args.host, port=args.port)
@@ -283,6 +301,7 @@ def _run_unified(args):
             args.reward_type, args.val_reward_kwargs,
         )
 
+    chunk_size = _resolve_chunk_size(args)
     render_obs = not args.no_render or args.vla_checkpoint is not None
 
     # Load one shared VLA model
@@ -290,7 +309,7 @@ def _run_unified(args):
     if args.vla_checkpoint:
         if args.policy == "smolvla":
             vla_policy = _load_smolvla_policy(
-                args.vla_checkpoint, args.smolvla_port, args.smolvla_n_action_steps)
+                args.vla_checkpoint, args.smolvla_port, chunk_size)
         else:
             vla_policy = _load_vla_policy(args.vla_checkpoint, args.preprocess_mode)
 
@@ -341,10 +360,12 @@ def _run_unified(args):
     train_manager = _create_manager(
         train_envs, args, vla_policy, "train", args.train_group_n,
         args.reward_type, train_reward_kwargs,
+        chunk_size=chunk_size,
     )
     val_manager = _create_manager(
         val_envs, args, vla_policy, "val", args.val_group_n,
         args.reward_type, val_reward_kwargs,
+        chunk_size=chunk_size,
     )
 
     server = MultiPoolEnvServer(
@@ -390,12 +411,14 @@ def main():
     parser.add_argument("--policy", type=str, default="lava",
                         choices=["lava", "gemini", "smolvla"])
     parser.add_argument("--gemini_timeout", type=float, default=30.0)
-    parser.add_argument("--smolvla_port", type=int, default=50100,
-                        help="TCP port for the SmolVLA policy subprocess server.")
-    parser.add_argument("--smolvla_n_action_steps", type=int, default=1,
-                        help="Number of consecutive actions the SmolVLA server "
-                             "returns per request (must be <= policy action_chunk_size). "
-                             "The client buffers them and executes one per env step.")
+    parser.add_argument("--smolvla_port", type=int, default=None,
+                        help="TCP port for the SmolVLA policy subprocess server. "
+                             "Defaults to --port + 50 (single) or --train_port + 50 (unified).")
+    parser.add_argument("--chunk_size", type=int, default=1,
+                        help="Number of actions buffered per policy inference call. "
+                             "chunk_size=1 means re-query every step (LAVA default). "
+                             "chunk_size=K means render+infer once per K sim steps. "
+                             "Ignored (forced to 1) for policy=lava.")
 
     # Single-pool mode args
     parser.add_argument("--port", type=int, default=50051)
@@ -423,6 +446,11 @@ def main():
                              "(unified mode).")
 
     args = parser.parse_args()
+
+    # Resolve smolvla_port default relative to the env server port
+    if args.smolvla_port is None:
+        base_port = args.train_port if args.unified else args.port
+        args.smolvla_port = base_port + 50
 
     logging.basicConfig(
         level=logging.INFO,

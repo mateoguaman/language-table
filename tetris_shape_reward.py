@@ -5,8 +5,16 @@ Expects keys produced by ``LanguageTable._compute_state`` / worker with
     block_<name>_translation  : (2,) float array [x, y] in metres
     block_<name>_mask         : (1,) float in [0, 1]
 
-The reward is 1.0 when the four on-table blocks snap onto a grid that matches
-any 90° rotation of the T tetromino, 0.0 otherwise.
+The table uses a 3x3 grid from ``normalize_workspace_xy`` (see
+``language_table.environments.workspace_xy``).
+Two T-tetromino orientations are accepted (top-heavy and bottom-heavy):
+
+    Top-heavy T:        Bottom-heavy T:
+      X X X               O O O
+      O X O               X X X
+      O O O               O X O
+
+    cells: {(0,0),(0,1),(0,2),(1,1)}    cells: {(1,0),(1,1),(1,2),(2,1)}
 
 Usage
 -----
@@ -17,79 +25,52 @@ Usage
 from __future__ import annotations
 
 import re
-from typing import Dict, FrozenSet, Iterable, List, Set, Tuple
+from typing import Dict, FrozenSet, Set, Tuple
 
 import numpy as np
 
+from language_table.environments.workspace_xy import normalize_workspace_xy
+
 Pair = Tuple[int, int]
 
+# Only two T orientations accepted (row-aligned, top-heavy or bottom-heavy).
+# Grid: col from xn (board top→bottom); row from yn (low yn = board right).
+_T_TOP: FrozenSet[Pair] = frozenset({(0, 0), (0, 1), (0, 2), (1, 1)})
+_T_BOTTOM: FrozenSet[Pair] = frozenset({(1, 0), (1, 1), (1, 2), (2, 1)})
 
-# ---------------------------------------------------------------------------
-# Grid / rotation helpers
-# ---------------------------------------------------------------------------
-
-def _normalize(cells: Iterable[Pair]) -> FrozenSet[Pair]:
-    """Translate so that min row == 0 and min col == 0."""
-    cells = list(cells)
-    mr = min(r for r, _ in cells)
-    mc = min(c for _, c in cells)
-    return frozenset((r - mr, c - mc) for r, c in cells)
+T_VALID: Set[FrozenSet[Pair]] = {_T_TOP, _T_BOTTOM}
 
 
-def _rotate_ccw(cells: Iterable[Pair]) -> Set[Pair]:
-    """90° counter-clockwise rotation: (r, c) → (-c, r)."""
-    return {(-c, r) for r, c in cells}
+def _to_grid_cell(xn: float, yn: float) -> Pair:
+    """Map normalized coords to (row, col) in 3x3 grid. Clamps to [0, 2]."""
+    col = int(np.clip(int(xn * 3), 0, 2))
+    row = int(np.clip(int(yn * 3), 0, 2))
+    return (row, col)
 
-
-def _all_rotations(base: Set[Pair]) -> Set[FrozenSet[Pair]]:
-    seen: Set[FrozenSet[Pair]] = set()
-    cur = set(base)
-    for _ in range(4):
-        cur = _rotate_ccw(cur)
-        seen.add(_normalize(cur))
-    return seen
-
-
-# T tetromino:   □
-#              □ □ □
-# canonical offsets (row, col), 0-indexed with top of stem at row 0:
-_T_BASE: Set[Pair] = {(0, 1), (1, 0), (1, 1), (1, 2)}
-
-T_ROTATIONS: Set[FrozenSet[Pair]] = _all_rotations(_T_BASE)
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def tetromino_t_reward_from_state(
     state_obs: Dict[str, np.ndarray],
-    cell_size: float = 0.045,
     mask_threshold: float = 0.5,
 ) -> float:
-    """Return 1.0 if on-table blocks form a T tetromino (any rotation), else 0.0.
+    """Return 1.0 if on-table blocks form an accepted T-tetromino, else 0.0.
+
+    Checks only the two row-aligned T orientations (top-heavy / bottom-heavy)
+    on a 3x3 grid derived from normalised workspace coordinates.
 
     Parameters
     ----------
     state_obs
         Full state dict from ``LanguageTable._compute_state`` (``return_full_state=True``).
         Keys: ``block_<name>_translation`` (shape ``(2,)``), ``block_<name>_mask`` (shape ``(1,)``).
-    cell_size
-        Grid quantisation spacing in metres. Must match the typical centre-to-centre
-        distance between adjacent blocks in the sim (~0.04–0.05 m).
     mask_threshold
         Blocks with ``mask[0] >= threshold`` are considered on-table.
 
     Returns
     -------
     float
-        1.0 on success, 0.0 otherwise. Scale to 100.0 if matching TetrisTaskProvider.
+        1.0 on success, 0.0 otherwise.
     """
-    if cell_size <= 0:
-        raise ValueError("cell_size must be positive")
-
-    xs: List[float] = []
-    ys: List[float] = []
+    cells: list[Pair] = []
     for key in state_obs:
         m = re.match(r"^block_(.+)_translation$", key)
         if not m:
@@ -101,18 +82,16 @@ def tetromino_t_reward_from_state(
         xy = np.asarray(state_obs[key], dtype=np.float64).reshape(-1)
         if xy.size < 2:
             continue
-        xs.append(float(xy[0]))
-        ys.append(float(xy[1]))
+        xn, yn = normalize_workspace_xy(float(xy[0]), float(xy[1]))
+        cells.append(_to_grid_cell(xn, yn))
 
-    if len(xs) != 4:
+    if len(cells) != 4:
         return 0.0
 
-    xy = np.stack([xs, ys], axis=1)
-    g = np.rint(xy / float(cell_size)).astype(np.int64)
+    cell_set: FrozenSet[Pair] = frozenset(cells)
 
     # Duplicate grid cells → blocks on top of each other → no valid shape.
-    if np.unique(g, axis=0).shape[0] != 4:
+    if len(cell_set) != 4:
         return 0.0
 
-    cells = _normalize((int(r), int(c)) for r, c in g)
-    return 1.0 if cells in T_ROTATIONS else 0.0
+    return 1.0 if cell_set in T_VALID else 0.0

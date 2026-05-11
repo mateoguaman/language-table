@@ -137,8 +137,10 @@ class EnvServer:
         """Return read-only properties that the client caches."""
         props = {}
         for name in ("num_attempts", "num_processes", "max_turns",
-                      "do_reflection"):
+                      "do_reflection", "block_mode"):
             props[name] = getattr(self.env, name, None)
+        if props["block_mode"] is None:
+            props["block_mode"] = getattr(getattr(self.env, "envs", None), "block_mode", None)
         return EnvResponse(
             request_id=request.request_id,
             status="ok",

@@ -73,8 +73,22 @@ class LanguageTableWorker:
             result.pop("rgb", None)
         return result
 
-    def step(self, action):
-        if not self._render_obs:
+    def step(self, action, skip_rgb: bool = False):
+        """Step the environment.
+
+        Parameters
+        ----------
+        action : array-like
+            2-D end-effector delta action.
+        skip_rgb : bool
+            When True, suppress the camera render for this step (obs will not
+            contain an 'rgb' key).  Used by the chunked-action path in the
+            manager so that steps where the policy is draining a buffered chunk
+            do not pay the camera cost.  Ignored when render_obs=False (already
+            no render happening).
+        """
+        suppress = not self._render_obs or skip_rgb
+        if suppress:
             self._skip_render()
         try:
             obs, reward, done, info = self.env.step(action)
@@ -91,10 +105,12 @@ class LanguageTableWorker:
             )
             raise
         finally:
-            if not self._render_obs:
+            if suppress:
                 self._restore_render()
 
         result_obs = self._extract_obs(obs, self.env._last_state)
+        if skip_rgb:
+            result_obs.pop("rgb", None)
         return result_obs, reward, done, info
 
     def reset(self, seed=None):
@@ -244,6 +260,7 @@ class LanguageTableMultiProcessEnv:
         self.env_num = num_envs
         self.num_processes = num_envs * group_n
         self.timeout = timeout
+        self.block_mode = block_mode if isinstance(block_mode, str) else block_mode.value
 
         np.random.seed(seed)
 
@@ -261,7 +278,8 @@ class LanguageTableMultiProcessEnv:
             for i in range(self.num_processes)
         ]
 
-    def step(self, actions, active_mask=None, cached_obs=None, cached_infos=None):
+    def step(self, actions, active_mask=None, cached_obs=None, cached_infos=None,
+             skip_rgb_mask=None):
         """Step active envs in parallel.
 
         Parameters
@@ -275,11 +293,23 @@ class LanguageTableMultiProcessEnv:
             Previous observations to reuse for inactive envs.
         cached_infos : list[dict] | None
             Previous infos to reuse for inactive envs.
+        skip_rgb_mask : np.ndarray[bool] | None
+            Per-env flag; when True for an active env the camera render is
+            suppressed and obs will not contain 'rgb'.  Used by the chunked-
+            action loop in the manager.
         """
         assert len(actions) == self.num_processes
 
+        if skip_rgb_mask is None:
+            skip_rgb_mask = np.zeros(self.num_processes, dtype=bool)
+        else:
+            skip_rgb_mask = np.asarray(skip_rgb_mask, dtype=bool)
+
         if active_mask is None:
-            futures = [w.step.remote(a) for w, a in zip(self.workers, actions)]
+            futures = [
+                w.step.remote(a, skip_rgb=bool(s))
+                for w, a, s in zip(self.workers, actions, skip_rgb_mask)
+            ]
             results = ray.get(futures, timeout=self.timeout)
             obs_list, reward_list, done_list, info_list = [], [], [], []
             for obs, reward, done, info in results:
@@ -310,7 +340,10 @@ class LanguageTableMultiProcessEnv:
                 info_list[idx]["skipped_step_after_done"] = True
             return obs_list, reward_list, done_list, info_list
 
-        futures = [self.workers[idx].step.remote(actions[idx]) for idx in active_indices]
+        futures = [
+            self.workers[idx].step.remote(actions[idx], skip_rgb=bool(skip_rgb_mask[idx]))
+            for idx in active_indices
+        ]
         results = ray.get(futures, timeout=self.timeout)
         for idx, (obs, reward, done, info) in zip(active_indices, results):
             obs_list[idx] = obs

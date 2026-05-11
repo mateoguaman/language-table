@@ -9,7 +9,7 @@ Follows the two-loop VLA architecture from pybullet_vla/env_manager.py:
 
 import logging
 import re
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -65,6 +65,7 @@ class LanguageTableEnvironmentManager:
         frame_subsample=5,
         n_steps=1,
         custom_task_provider: Optional[TaskProvider] = None,
+        chunk_size: int = 1,
     ):
         self.envs = envs
         self.num_processes = envs.num_processes
@@ -78,6 +79,7 @@ class LanguageTableEnvironmentManager:
         self._frame_subsample = max(1, frame_subsample)
         self.n_steps = n_steps
         self._provider = custom_task_provider
+        self.chunk_size = max(1, chunk_size)
 
         # Action space bounds (Language Table uses [-0.1, 0.1]^2)
         self._action_low = -0.1
@@ -208,6 +210,7 @@ class LanguageTableEnvironmentManager:
             "text": text_obs,
             "image": self._extract_images(obs_list),
             "anchor": text_obs,
+            "state": obs_list,
         }
         return observations, infos
 
@@ -246,6 +249,7 @@ class LanguageTableEnvironmentManager:
             "text": text_obs,
             "image": self._extract_images(obs_list),
             "anchor": text_obs,
+            "state": obs_list,
         }
         return observations, infos
 
@@ -320,10 +324,15 @@ class LanguageTableEnvironmentManager:
         When a VLA policy is provided, it receives the LLM's goal strings as
         language conditioning and produces actions from RGB observations.
         Otherwise, falls back to random actions.
+
+        Action chunking: each active env maintains a FIFO of depth chunk_size.
+        When the FIFO is empty the policy is queried via predict_chunk, which
+        returns >= chunk_size actions; only the first chunk_size are kept.
+        On steps where the FIFO is still non-empty after the pop, rendering is
+        skipped (skip_rgb=True) and no video frame is captured.
         """
-        
         raw_strings = list(goal_strings)
-        for i, raw in enumerate(raw_strings):   
+        for i, raw in enumerate(raw_strings):
             cleaned = clean_string(raw)
             goal_strings[i] = cleaned
 
@@ -335,20 +344,55 @@ class LanguageTableEnvironmentManager:
         last_infos = [{} for _ in range(batch)]
         self._last_goal_strings = list(goal_strings)
 
+        # Per-env action FIFOs (owned by the manager, not the policy).
+        action_fifos: List[deque] = [deque() for _ in range(batch)]
+
         all_frames = [[] for _ in range(batch)]
         for i in range(batch):
             if "rgb" in self._last_obs_list[i]:
                 all_frames[i].append(self._last_obs_list[i]["rgb"].copy())
 
         # Seed the VLA with the obs cached from reset()/restart().
-        # After the first env.step(), we use its returned obs instead — just
-        # like the original eval loop: obs = env.reset(); while: action =
-        # policy(obs); obs = env.step(action).
         obs_list_for_vla = self._last_obs_list if self.vla is not None else None
 
         for inner_step in range(self.max_inner_steps):
             if self.vla is not None:
-                actions = self.vla.predict(goal_strings, obs_list_for_vla, active_mask)
+                # Refill FIFOs for envs that are active and have no buffered actions.
+                refill_mask = np.array(
+                    [active_mask[i] and len(action_fifos[i]) == 0
+                     for i in range(batch)],
+                    dtype=bool,
+                )
+                if refill_mask.any():
+                    chunks = self.vla.predict_chunk(
+                        goal_strings, obs_list_for_vla, refill_mask,
+                    )
+                    for i in range(batch):
+                        if not refill_mask[i]:
+                            continue
+                        chunk = chunks[i]  # (N_i, 2)
+                        if len(chunk) < self.chunk_size:
+                            raise AssertionError(
+                                f"predict_chunk returned {len(chunk)} actions for env {i} "
+                                f"but chunk_size={self.chunk_size} required"
+                            )
+                        for a in chunk[: self.chunk_size]:
+                            action_fifos[i].append(np.asarray(a, dtype=np.float32))
+
+                # Pop one action per env from the FIFO.
+                actions = [
+                    action_fifos[i].popleft() if active_mask[i] else np.zeros(2, dtype=np.float32)
+                    for i in range(batch)
+                ]
+
+                # Skip rendering for envs that still have buffered actions.
+                # The next predict_chunk for those envs won't use obs['rgb'],
+                # so we save a camera render per skip step.
+                skip_rgb_mask = np.array(
+                    [active_mask[i] and len(action_fifos[i]) > 0
+                     for i in range(batch)],
+                    dtype=bool,
+                )
             else:
                 # Random actions fallback (no VLA loaded)
                 if inner_step == 0:
@@ -358,11 +402,10 @@ class LanguageTableEnvironmentManager:
                     )
                 actions = [
                     np.random.uniform(self._action_low, self._action_high, size=(2,)).astype(np.float32)
-                    for _ in range(batch)
+                    if active_mask[i] else np.zeros(2, dtype=np.float32)
+                    for i in range(batch)
                 ]
-                for i in range(batch):
-                    if not active_mask[i]:
-                        actions[i] = np.zeros(2, dtype=np.float32)
+                skip_rgb_mask = np.zeros(batch, dtype=bool)
 
             action_array = np.asarray(actions, dtype=np.float32)
             invalid_action_mask = ~np.isfinite(action_array).all(axis=1)
@@ -387,19 +430,23 @@ class LanguageTableEnvironmentManager:
                     active_mask=active_mask,
                     cached_obs=cached_obs,
                     cached_infos=last_infos,
+                    skip_rgb_mask=skip_rgb_mask,
                 )
             except Exception:
                 self._log_step_failure(inner_step, goal_strings, actions, active_mask)
                 raise
 
-            # Feed fresh observations back to the VLA for the next iteration,
-            # matching the original eval loop: action = policy(obs); obs = env.step(action)
+            # Feed fresh observations back to the VLA for the next refill.
+            # On skip steps obs['rgb'] is absent; that's fine because the next
+            # predict_chunk won't be called until the FIFO empties (at which
+            # point a fresh render will have occurred).
             if self.vla is not None:
                 obs_list_for_vla = obs_list
 
+            # Capture video frames only on steps where RGB was actually rendered.
             if (inner_step + 1) % self._frame_subsample == 0:
                 for i in range(batch):
-                    if active_mask[i] and "rgb" in obs_list[i]:
+                    if active_mask[i] and not skip_rgb_mask[i] and "rgb" in obs_list[i]:
                         all_frames[i].append(obs_list[i]["rgb"].copy())
 
             rewards = np.array(rewards, dtype=np.float32)
@@ -410,6 +457,11 @@ class LanguageTableEnvironmentManager:
             newly_done = dones & active_mask
             final_dones |= newly_done
             active_mask &= ~dones
+            # Clear FIFOs for newly-done envs so they don't interfere with
+            # subsequent attempts/restarts.
+            for i in np.flatnonzero(newly_done):
+                action_fifos[i].clear()
+
             if newly_done.any():
                 logger.info(
                     "Language Table inner step %d completed envs=%s remaining_active=%d",

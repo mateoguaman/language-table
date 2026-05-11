@@ -1,5 +1,4 @@
 import atexit, pickle, socket, struct, subprocess, time
-from collections import deque
 import os
 import numpy as np
 
@@ -37,6 +36,17 @@ def _recv(sock):
 
 
 class SmolVLAPolicy:
+    """SmolVLA policy client.
+
+    The manager (LanguageTableEnvironmentManager) owns action chunking via its
+    per-env FIFO.  This class exposes ``predict_chunk`` which issues one TCP
+    request per active env and returns the server's full ``(K_server, 2)``
+    array.  The manager trims to its own ``chunk_size`` and stores the rest.
+
+    ``predict`` is kept as a thin back-compat wrapper for standalone test
+    scripts (e.g. test_lava_standalone.py) that call it directly.
+    """
+
     def __init__(self, checkpoint_path,
                  host="127.0.0.1", port=50100,
                  n_action_steps=1,
@@ -45,8 +55,6 @@ class SmolVLAPolicy:
         self.host, self.port = host, port
         self.n_action_steps = max(1, n_action_steps)
         self.proc, self.sock = None, None
-        # Per-env buffers; populated lazily from server-returned action lists.
-        self._action_buffers: list[deque] = []
         self._spawn_server(checkpoint_path, n_action_steps, server_log, ready_timeout)
         self._connect()
         atexit.register(self.close)
@@ -78,7 +86,6 @@ class SmolVLAPolicy:
         self.sock.connect((self.host, self.port))
 
     def reset(self, num_envs=1):
-        self._action_buffers = [deque() for _ in range(num_envs)]
         _send(self.sock, {"method": "reset"})
         resp = _recv(self.sock)
         if resp.get("status") != "ok":
@@ -95,37 +102,50 @@ class SmolVLAPolicy:
         )
         return rgb.tolist(), state.tolist()
 
-    def predict(self, goals, obs_list, active_mask):
-        """Return one action per env: List[np.ndarray shape (2,)].
+    def predict_chunk(self, goals, obs_list, active_mask):
+        """Return the server's full action chunk per active env.
 
-        Queries the server only when the per-env buffer is empty; otherwise
-        pops the next pre-fetched action. With n_action_steps=1 (default)
-        this is equivalent to querying every step.
+        For each active env issues one TCP ``action`` request and returns the
+        server's ``(K_server, 2)`` array.  Inactive envs get a ``(1, 2)``
+        zero array.
+
+        The caller (LanguageTableEnvironmentManager) owns chunking: it asserts
+        ``K_server >= chunk_size`` and keeps only the first ``chunk_size``
+        actions per env.
+
+        Returns
+        -------
+        List[np.ndarray]
+            One ``(K_i, 2)`` float32 array per env.  ``K_i == K_server`` for
+            active envs, ``K_i == 1`` (zeros) for inactive envs.
         """
-        # Ensure buffers exist (in case reset() was never called explicitly).
-        while len(self._action_buffers) < len(goals):
-            self._action_buffers.append(deque())
-
-        actions = []
-        for i, (goal, obs, active) in enumerate(zip(goals, obs_list, active_mask)):
+        chunks = []
+        for goal, obs, active in zip(goals, obs_list, active_mask):
             if not active:
-                actions.append(np.zeros(2, dtype=np.float32))
+                chunks.append(np.zeros((1, 2), dtype=np.float32))
                 continue
-            if not self._action_buffers[i]:
-                rgb, state = self._obs_to_wire(obs)
-                _send(self.sock, {
-                    "method": "action",
-                    "rgb": rgb,
-                    "state": state,
-                    "instruction": goal,
-                })
-                resp = _recv(self.sock)
-                if resp.get("status") != "ok":
-                    raise RuntimeError(f"action failed: {resp.get('error_message')}")
-                for a in resp["actions"]:
-                    self._action_buffers[i].append(np.asarray(a, dtype=np.float32))
-            actions.append(self._action_buffers[i].popleft())
-        return actions
+            rgb, state = self._obs_to_wire(obs)
+            _send(self.sock, {
+                "method": "action",
+                "rgb": rgb,
+                "state": state,
+                "instruction": goal,
+            })
+            resp = _recv(self.sock)
+            if resp.get("status") != "ok":
+                raise RuntimeError(f"action failed: {resp.get('error_message')}")
+            chunk = np.asarray(resp["actions"], dtype=np.float32)  # (K_server, 2)
+            chunks.append(chunk)
+        return chunks
+
+    def predict(self, goals, obs_list, active_mask):
+        """Back-compat: return one action per env.
+
+        Calls ``predict_chunk`` and returns the first action from each chunk.
+        Standalone test scripts that call ``predict`` directly continue to work.
+        """
+        chunks = self.predict_chunk(goals, obs_list, active_mask)
+        return [c[0] for c in chunks]
 
     def close(self):
         if self.sock is not None:

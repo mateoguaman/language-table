@@ -449,3 +449,17 @@ class LAVAPolicy:
         actions[~active_mask] = 0.0
 
         return [actions[i].astype(np.float32) for i in range(batch_size)]
+
+    def predict_chunk(
+        self,
+        goals: List[str],
+        obs_list: List[Dict[str, Any]],
+        active_mask: np.ndarray,
+    ) -> List[np.ndarray]:
+        """Return a (1, 2) chunk per env — LAVA always produces one action.
+
+        Compatible with the unified chunking contract in LanguageTableEnvironmentManager.
+        chunk_size=1 ensures the assert N_i >= chunk_size is always satisfied.
+        """
+        actions = self.predict(goals, obs_list, active_mask)
+        return [a[np.newaxis, :] for a in actions]  # List of (1, 2)
