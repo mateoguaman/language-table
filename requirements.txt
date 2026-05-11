@@ -1,8 +1,11 @@
 clu
 dm-reverb==0.11.0
 gym<=0.23.0
-jax[cuda12]==0.4.30
+# Keep JAX CUDA stack fully pinned to avoid resolver drift.
+jax==0.4.30
 jaxlib==0.4.30
+jax-cuda12-plugin==0.4.30
+jax-cuda12-pjrt==0.4.30
 matplotlib
 numpy
 opencv-python
@@ -20,7 +23,15 @@ tf_agents==0.14.0
 flax==0.8.5
 git+https://github.com/openai/CLIP.git
 # LaMer integration (language_table/lamer/)
-ray[default]
-google-genai
+ray[default]==2.47.1
+google-genai==1.74.0
+anthropic
+openai
+# CLIP imports torch; pin to CUDA-12.1 era wheels compatible with 550 drivers.
+torch==2.4.1
+torchvision==0.19.1
+nvidia-cudnn-cu12==9.1.0.70
+nvidia-cuda-nvcc-cu12==12.3.107
 # setuptools with pkg_resources (needed by tensorflow_hub, removed in setuptools>=70)
 setuptools<70
+imageio[ffmpeg]
