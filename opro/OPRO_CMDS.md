@@ -1,0 +1,8 @@
+# OPRO
+python run_opro.py   --n_iterations 15   --n_steps 20   --steerer_model gemini-3-flash-preview   --optimizer_model gemini-3-flash-preview   --reward_fn geometric   --obs_modality text   --history_window 15   --host 127.0.0.1   --port 50051   --output_dir ./opro_runs > opro.log 2>&1
+
+# LAVA
+CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false ./ltvenv/bin/python -m language_table.lamer.server_main   --host 127.0.0.1   --port 50051   --num_envs 16   --group_n 1   --block_mode BLOCK_4   --max_inner_steps 10   --num_attempts 1   --max_turns 30  --reward_type custom   --reward_kwargs '{"provider":"TetrisTaskProvider","shapes":["T"],"seed":0,"instruction_template":"arrange the blocks into the tetris/tetromino shape: {letter}", "dummy_zero_reward":true}'   --split train   --preprocess_mode jax_gpu   --vla_checkpoint /home/memmelma/Projects/metarl/language-table/bc_resnet_sim_checkpoint_955000   --include_rgb --chunk_size=1
+
+# SmolVLA
+CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false ./ltvenv/bin/python -m language_table.lamer.server_main   --host 127.0.0.1   --port 50051   --num_envs 16   --group_n 1   --block_mode BLOCK_4   --max_inner_steps 30   --num_attempts 1   --max_turns 20  --reward_type custom   --reward_kwargs '{"provider":"TetrisTaskProvider","shapes":["T"],"seed":0,"instruction_template":"arrange the blocks into the tetris/tetromino shape: {letter}", "dummy_zero_reward":true}'   --split train   --preprocess_mode jax_gpu   --vla_checkpoint mateoguaman/smolvla_lt_combined_sim_93185   --include_rgb --policy smolvla --chunk_size=10
