@@ -355,6 +355,8 @@ class LanguageTableEnvironmentManager:
         # Seed the VLA with the obs cached from reset()/restart().
         obs_list_for_vla = self._last_obs_list if self.vla is not None else None
 
+        # logger.info(f"goal_strings: {goal_strings}")
+        # logger.info(f"obs_list_for_vla: {self.max_inner_steps}")
         for inner_step in range(self.max_inner_steps):
             if self.vla is not None:
                 # Refill FIFOs for envs that are active and have no buffered actions.

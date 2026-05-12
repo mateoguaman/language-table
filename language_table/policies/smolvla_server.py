@@ -155,6 +155,40 @@ class LeRobotPolicyServer:
 
         return np.stack(actions, axis=0)  # (n_action_steps, 2)
 
+    def get_actions_batch(self, rgb_batch, state_batch, instruction_batch: str) -> np.ndarray:
+        """Return n_action_steps consecutive actions from the policy's chunk buffer.
+
+        The first call triggers a full forward pass (filling the internal
+        action-chunk queue). Subsequent calls within the same chunk drain the
+        queue without re-running inference. A new forward pass runs
+        automatically when the queue is exhausted.
+
+        Args:
+            rgb: uint8 image as nested list (H, W, 3) or ndarray
+            state: float32 end-effector position as list (2,) or ndarray
+            instruction: language instruction text
+
+        Returns:
+            float32 array of shape (n_action_steps, 2)
+        """
+        rgb = np.asarray(rgb_batch, dtype=np.uint8)    # (N, H, W, 3)
+        state = np.asarray(state_batch, dtype=np.float32)  # (N, 2)
+
+        img_tensor = torch.from_numpy(rgb).permute(0, 3, 1, 2).float() / 255.0  # (N, 3, H, W)
+        state_tensor = torch.from_numpy(state).float()  # (N, 2)
+
+        batch = {
+            "observation.images.rgb": img_tensor,
+            "observation.state": state_tensor,
+            "task": instruction_batch,
+        }
+        b = self.preprocessor(batch)
+        state_key = "observation.state"
+        actions = self.policy.predict_action_chunk(b)
+        actions = self.postprocessor(actions)
+        return actions.cpu().numpy()  # (N, K, 2)
+
+
     def reset(self):
         """Reset policy state (for policies with internal state like action chunks)."""
         if hasattr(self.policy, 'reset'):
@@ -201,6 +235,19 @@ class LeRobotPolicyServer:
                         request["rgb"], request["state"], request["instruction"])
                     send_message(conn, {
                         "status": "ok", "actions": actions.tolist()})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    send_message(conn, {
+                        "status": "error", "error_message": str(e)})
+            elif method == "action_batch":
+                try:
+                    # Returns (N, K, 2); sent as nested list.
+                    actions = self.get_actions_batch(
+                        request["rgb_batch"], request["state_batch"],
+                        request["instructions"])
+                    send_message(conn, {
+                        "status": "ok", "actions_batch": actions.tolist()})
                 except Exception as e:
                     import traceback
                     traceback.print_exc()

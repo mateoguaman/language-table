@@ -126,23 +126,30 @@ class SmolVLAPolicy:
             One ``(K_i, 2)`` float32 array per env.  ``K_i == K_server`` for
             active envs, ``K_i == 1`` (zeros) for inactive envs.
         """
-        chunks = []
-        for goal, obs, active in zip(goals, obs_list, active_mask):
-            if not active:
-                chunks.append(np.zeros((1, 2), dtype=np.float32))
-                continue
-            rgb, state = self._obs_to_wire(obs)
-            _send(self.sock, {
-                "method": "action",
-                "rgb": rgb,
-                "state": state,
-                "instruction": goal,
-            })
-            resp = _recv(self.sock)
-            if resp.get("status") != "ok":
-                raise RuntimeError(f"action failed: {resp.get('error_message')}")
-            chunk = np.asarray(resp["actions"], dtype=np.float32)  # (K_server, 2)
-            chunks.append(chunk)
+        active_indices = [i for i, a in enumerate(active_mask) if a]
+        chunks = [np.zeros((1, 2), dtype=np.float32)] * len(goals)
+        if not active_indices:
+            return chunks
+
+        rgb_batch, state_batch, instructions = [], [], []
+        for i in active_indices:
+            rgb, state = self._obs_to_wire(obs_list[i])
+            rgb_batch.append(rgb)
+            state_batch.append(state)
+            instructions.append(goals[i])
+
+        _send(self.sock, {
+            "method": "action_batch",
+            "rgb_batch": rgb_batch,
+            "state_batch": state_batch,
+            "instructions": instructions,
+        })
+        resp = _recv(self.sock)
+        if resp.get("status") != "ok":
+            raise RuntimeError(f"action_batch failed: {resp.get('error_message')}")
+        actions_batch = np.asarray(resp["actions_batch"], dtype=np.float32)  # (N_active, K, 2)
+        for j, i in enumerate(active_indices):
+            chunks[i] = actions_batch[j]
         return chunks
 
     def predict(self, goals, obs_list, active_mask):
