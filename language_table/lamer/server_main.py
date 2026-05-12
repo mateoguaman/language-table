@@ -42,6 +42,7 @@ from language_table.environments.rewards.multistep_block_to_location import (
     make_multistep_reward,
 )
 from language_table.environments.rewards.composite import CompositeReward
+from language_table.environments.rewards.tetris_shape import TetrisShapeReward
 
 REWARD_TYPES = {
     "composite": CompositeReward,
@@ -51,6 +52,7 @@ REWARD_TYPES = {
     "block2block_relative_location": BlockToBlockRelativeLocationReward,
     "point2block": PointToBlockReward,
     "separate_blocks": SeparateBlocksReward,
+    "tetris_shape": TetrisShapeReward,
     "multistep": None,
     "custom": None,
     "none": None,

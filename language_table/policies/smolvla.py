@@ -2,9 +2,16 @@ import atexit, pickle, socket, struct, subprocess, time
 import os
 import numpy as np
 
-REPO = os.path.expanduser("~/Projects/metarl/language-table")
-CONDA_ENV = "/home/sidhraja/miniconda3/envs/lerobotenv"
-use_conda = False
+
+tillicum = os.environ.get("TILLICUM", False)
+
+if tillicum:
+    REPO = "/gpfs/projects/stf/sidhraja/projects/language-table"
+    CONDA_ENV = "/gpfs/projects/stf/sidhraja/.conda/envs/lerobotenv"
+else:
+    REPO = os.path.expanduser("~/projects/language-table")
+    CONDA_ENV = "/home/sidhraja/miniconda3/envs/lerobotenv"
+use_conda = True
 if use_conda:
     LEROBOT_PYTHON = f"{CONDA_ENV}/bin/python"
 else:
