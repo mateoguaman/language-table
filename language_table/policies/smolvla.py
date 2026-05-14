@@ -118,8 +118,14 @@ class SmolVLAPolicy:
         if resp.get("status") != "ok":
             raise RuntimeError(f"reset failed: {resp.get('error_message')}")
 
-    def _obs_to_wire(self, obs):
+    def _obs_to_wire(self, obs, env_idx=None):
         """Extract RGB and state from an obs dict, ready for the wire."""
+        if not isinstance(obs, dict) or "rgb" not in obs:
+            keys = sorted(obs.keys()) if isinstance(obs, dict) else type(obs).__name__
+            raise KeyError(
+                f"SmolVLA requires obs['rgb'] for env_idx={env_idx}; "
+                f"available keys={keys}"
+            )
         rgb = obs["rgb"]
         if rgb.dtype != np.uint8:
             rgb = (rgb * 255).clip(0, 255).astype(np.uint8)
@@ -153,7 +159,7 @@ class SmolVLAPolicy:
 
         rgb_batch, state_batch, instructions = [], [], []
         for i in active_indices:
-            rgb, state = self._obs_to_wire(obs_list[i])
+            rgb, state = self._obs_to_wire(obs_list[i], env_idx=i)
             rgb_batch.append(rgb)
             state_batch.append(state)
             instructions.append(goals[i])

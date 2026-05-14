@@ -174,6 +174,18 @@ class LanguageTableEnvironmentManager:
             for i in range(len(text_obs))
         ]
 
+    def _ensure_rgb_for_vla(self, obs_list, indices):
+        """Render once for cached VLA observations that skipped RGB."""
+        if self.vla is None:
+            return obs_list
+
+        for i in indices:
+            if isinstance(obs_list[i], dict) and "rgb" not in obs_list[i]:
+                obs = dict(obs_list[i])
+                obs["rgb"] = self.envs.render(i)
+                obs_list[i] = obs
+        return obs_list
+
     def reset(self):
         """Reset all envs and return text observations."""
         obs_list, infos = self.envs.reset()
@@ -459,6 +471,10 @@ class LanguageTableEnvironmentManager:
             newly_done = dones & active_mask
             final_dones |= newly_done
             active_mask &= ~dones
+            if newly_done.any():
+                obs_list = self._ensure_rgb_for_vla(
+                    obs_list, np.flatnonzero(newly_done)
+                )
             # Clear FIFOs for newly-done envs so they don't interfere with
             # subsequent attempts/restarts.
             for i in np.flatnonzero(newly_done):
@@ -490,6 +506,7 @@ class LanguageTableEnvironmentManager:
         #     )
 
         final_obs = last_obs if last_obs is not None else [{}] * batch
+        final_obs = self._ensure_rgb_for_vla(list(final_obs), range(batch))
         text_obs = batch_state_to_text(final_obs)
 
         # Custom reward: replace the env's accumulated per-step rewards
