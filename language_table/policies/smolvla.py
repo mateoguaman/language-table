@@ -57,11 +57,14 @@ class SmolVLAPolicy:
     def __init__(self, checkpoint_path,
                  host="127.0.0.1", port=50100,
                  n_action_steps=1,
-                 server_log="/tmp/smolvla_interactive.log",
+                 server_log=None,
                  ready_timeout=300.0):
         self.host, self.port = host, port
         self.n_action_steps = max(1, n_action_steps)
         self.proc, self.sock = None, None
+        if server_log is None:
+            job_id = os.environ.get("SLURM_JOB_ID", "local")
+            server_log = f"/tmp/smolvla_interactive_{job_id}_{os.getpid()}_{port}.log"
         self._spawn_server(checkpoint_path, n_action_steps, server_log, ready_timeout)
         self._connect()
         atexit.register(self.close)
@@ -89,8 +92,25 @@ class SmolVLAPolicy:
         raise RuntimeError(f"server not ready within {timeout}s; see {log_path}")
 
     def _connect(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((self.host, self.port))
+        deadline = time.time() + 30.0
+        last_error = None
+        while time.time() < deadline:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                sock.connect((self.host, self.port))
+                self.sock = sock
+                return
+            except OSError as exc:
+                last_error = exc
+                sock.close()
+                if self.proc is not None and self.proc.poll() is not None:
+                    raise RuntimeError(
+                        f"SmolVLA server exited before connect: {last_error}"
+                    ) from exc
+                time.sleep(0.5)
+        raise ConnectionError(
+            f"Could not connect to SmolVLA server at {self.host}:{self.port}"
+        ) from last_error
 
     def reset(self, num_envs=1):
         _send(self.sock, {"method": "reset"})

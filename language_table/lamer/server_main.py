@@ -416,7 +416,7 @@ def main():
     parser.add_argument("--smolvla_port", type=int, default=None,
                         help="TCP port for the SmolVLA policy subprocess server. "
                              "Defaults to --port + 50 (single) or --train_port + 50 (unified).")
-    parser.add_argument("--chunk_size", type=int, default=1,
+    parser.add_argument("--chunk_size", type=int, default=10,
                         help="Number of actions buffered per policy inference call. "
                              "chunk_size=1 means re-query every step (LAVA default). "
                              "chunk_size=K means render+infer once per K sim steps. "
