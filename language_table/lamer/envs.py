@@ -48,6 +48,7 @@ class LanguageTableWorker:
             seed=seed,
             **env_kwargs,
         )
+        self.env._render_text_in_image = False
         # Save original render function so we can toggle it on/off
         self._orig_render = self.env._render_camera
         self._noop_render = lambda *a, **kw: None

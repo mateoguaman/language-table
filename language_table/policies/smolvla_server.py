@@ -117,6 +117,18 @@ class LeRobotPolicyServer:
               f"{[type(s).__name__ for s in self.preprocessor.steps]}")
         print(f"n_action_steps: {self.n_action_steps}")
 
+    def _zero_action_noise(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        """Use deterministic flow matching by starting denoising from zeros."""
+        return torch.zeros(
+            (
+                batch_size,
+                self.policy.config.chunk_size,
+                self.policy.config.max_action_dim,
+            ),
+            dtype=torch.float32,
+            device=device,
+        )
+
     def get_actions(self, rgb, state, instruction: str) -> np.ndarray:
         """Return n_action_steps consecutive actions from the policy's chunk buffer.
 
@@ -149,7 +161,10 @@ class LeRobotPolicyServer:
         with torch.no_grad():
             for _ in range(self.n_action_steps):
                 b = self.preprocessor(batch)
-                action = self.policy.select_action(b)
+                state_key = "observation.state"
+                noise = self._zero_action_noise(
+                    b[state_key].shape[0], b[state_key].device)
+                action = self.policy.select_action(b, noise=noise)
                 action = self.postprocessor(action)
                 actions.append(action.cpu().numpy().flatten()[:2])
 
@@ -184,7 +199,8 @@ class LeRobotPolicyServer:
         }
         b = self.preprocessor(batch)
         state_key = "observation.state"
-        actions = self.policy.predict_action_chunk(b)
+        noise = self._zero_action_noise(b[state_key].shape[0], b[state_key].device)
+        actions = self.policy.predict_action_chunk(b, noise=noise)
         actions = self.postprocessor(actions)
         return actions.cpu().numpy()  # (N, K, 2)
 
