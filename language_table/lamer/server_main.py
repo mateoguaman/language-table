@@ -163,7 +163,7 @@ def _load_pink_noise_policy(seed=0, chunk_size=1):
 
 
 def _create_env_pool(num_envs, group_n, block_mode, reward_factory_cls,
-                     seed, render_obs, return_full_state):
+                     seed, render_obs, return_full_state, max_seeds):
     """Create a Ray-parallelized environment pool."""
     from .envs import LanguageTableMultiProcessEnv
 
@@ -175,6 +175,7 @@ def _create_env_pool(num_envs, group_n, block_mode, reward_factory_cls,
         group_n=group_n,
         return_full_state=return_full_state,
         render_obs=render_obs,
+        max_seeds=max_seeds,
     )
 
 
@@ -256,6 +257,7 @@ def _create_manager(
         n_steps=n_steps,
         custom_task_provider=custom_task_provider,
         chunk_size=chunk_size,
+        max_seeds=args.max_seeds,
     )
 
 
@@ -285,6 +287,7 @@ def _run_single(args):
         group_n=args.group_n,
         return_full_state=not args.no_full_state,
         render_obs=render_obs,
+        max_seeds=args.max_seeds,
     )
 
     logger.info("Warming up %d workers (test reset)...", args.num_envs * args.group_n)
@@ -341,6 +344,7 @@ def _run_unified(args):
         seed=args.seed,
         render_obs=render_obs,
         return_full_state=not args.no_full_state,
+        max_seeds=args.max_seeds,
     )
 
     # Create val env pool (offset seed to avoid overlap)
@@ -359,6 +363,7 @@ def _run_unified(args):
         seed=val_seed,
         render_obs=render_obs,
         return_full_state=not args.no_full_state,
+        max_seeds=args.max_seeds,
     )
 
     # Warm up both pools
@@ -407,6 +412,8 @@ def main():
     parser.add_argument("--max_inner_steps", type=int, default=100)
     parser.add_argument("--do_reflection", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--max_seeds", type=int, default=16,
+                        help="Upper bound for per-episode reset seed sampling.")
     parser.add_argument("--reward_type", type=str, default="block2block",
                         choices=list(REWARD_TYPES.keys()))
     parser.add_argument("--reward_kwargs", type=str, default="{}",
@@ -459,6 +466,8 @@ def main():
                              "(unified mode).")
 
     args = parser.parse_args()
+    if args.max_seeds <= 0:
+        parser.error("--max_seeds must be positive")
 
     # Resolve smolvla_port default relative to the env server port
     if args.smolvla_port is None:
@@ -475,23 +484,24 @@ def main():
         logger.info(
             "Unified server config: host=%s train_port=%d val_port=%d "
             "train_envs=%dx%d val_envs=%dx%d policy=%s max_steps=%d "
-            "reward_type=%s train_block_mode=%s val_block_mode=%s",
+            "reward_type=%s train_block_mode=%s val_block_mode=%s max_seeds=%d",
             args.host, args.train_port, args.val_port,
             args.train_num_envs, args.train_group_n,
             args.val_num_envs, args.val_group_n,
             args.policy, args.max_inner_steps,
             args.reward_type, args.train_block_mode, args.val_block_mode,
+            args.max_seeds,
         )
         _run_unified(args)
     else:
         logger.info(
             "Server config: host=%s port=%d envs=%d group_n=%d blocks=%s "
             "policy=%s split=%s max_steps=%d attempts=%d turns=%d "
-            "reward_type=%s",
+            "reward_type=%s max_seeds=%d",
             args.host, args.port, args.num_envs, args.group_n,
             args.block_mode, args.policy, args.split,
             args.max_inner_steps, args.num_attempts, args.max_turns,
-            args.reward_type,
+            args.reward_type, args.max_seeds,
         )
         _run_single(args)
 

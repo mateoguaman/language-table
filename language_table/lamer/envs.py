@@ -109,6 +109,7 @@ class LanguageTableWorker:
             if suppress:
                 self._restore_render()
 
+        info["low_level_seed"] = self.seed_val
         result_obs = self._extract_obs(obs, self.env._last_state)
         if skip_rgb:
             result_obs.pop("rgb", None)
@@ -275,6 +276,7 @@ class LanguageTableMultiProcessEnv:
         timeout=None,
         return_full_state=True,
         render_obs=True,
+        max_seeds: int = 16,
         **env_kwargs,
     ):
         if not ray.is_initialized():
@@ -286,6 +288,7 @@ class LanguageTableMultiProcessEnv:
         self.num_processes = num_envs * group_n
         self.timeout = timeout
         self.block_mode = block_mode if isinstance(block_mode, str) else block_mode.value
+        self.max_seeds = max_seeds
 
         np.random.seed(seed)
 
@@ -384,13 +387,13 @@ class LanguageTableMultiProcessEnv:
     def reset(self):
         """Reset all envs with unique seeds."""
         if self.is_train:
-            seeds = np.random.randint(0, 2**16 - 1, size=self.env_num)
+            seeds = np.random.randint(0, self.max_seeds, size=self.env_num)
         else:
-            seeds = np.random.randint(2**16, 2**32 - 1, size=self.env_num)
+            seeds = np.random.randint(0, self.max_seeds, size=self.env_num)
 
-        # seeds = np.repeat(seeds, self.group_n).tolist()
+        seeds = np.repeat(seeds, self.group_n).tolist()
         # DEBUG: set all seeds to 0
-        seeds = np.zeros(self.num_processes, dtype=int)
+        # seeds = np.zeros(self.num_processes, dtype=int)
         
         futures = [w.reset.remote(seed=s) for w, s in zip(self.workers, seeds)]
         results = ray.get(futures, timeout=self.timeout)

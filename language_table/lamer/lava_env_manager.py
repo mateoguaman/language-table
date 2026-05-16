@@ -66,6 +66,7 @@ class LanguageTableEnvironmentManager:
         n_steps=1,
         custom_task_provider: Optional[TaskProvider] = None,
         chunk_size: int = 1,
+        max_seeds: Optional[int] = None,
     ):
         self.envs = envs
         self.num_processes = envs.num_processes
@@ -80,6 +81,9 @@ class LanguageTableEnvironmentManager:
         self.n_steps = n_steps
         self._provider = custom_task_provider
         self.chunk_size = max(1, chunk_size)
+        self.max_seeds = max_seeds
+        if max_seeds is not None:
+            self.envs.max_seeds = max_seeds
 
         # Action space bounds (Language Table uses [-0.1, 0.1]^2)
         self._action_low = -0.1
