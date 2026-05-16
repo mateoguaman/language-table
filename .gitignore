@@ -112,3 +112,7 @@ wandb/
 # OPRO
 2026*/
 opro/models/secret.py
+
+# Language Table
+tmp/
+CLAUDE.md

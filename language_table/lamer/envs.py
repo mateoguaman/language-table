@@ -193,6 +193,27 @@ class LanguageTableWorker:
     def get_pybullet_state(self):
         return self.env.get_pybullet_state()
 
+    def get_object_positions(self):
+        """Return gripper and block positions as plain Python values."""
+        env = self.env
+        gripper_pose = env._robot.forward_kinematics()
+        positions = {
+            "gripper": np.asarray(gripper_pose.translation, dtype=np.float64).tolist(),
+            "gripper_target": np.asarray(
+                env._target_effector_pose.translation, dtype=np.float64
+            ).tolist(),
+            "blocks": {},
+            "blocks_on_table": list(getattr(env, "_blocks_on_table", [])),
+            "seed": self.seed_val,
+            "instruction": getattr(env, "_instruction_str", None),
+        }
+
+        for block_name, block_id in env._block_to_pybullet_id.items():
+            pos, _ = env._pybullet_client.getBasePositionAndOrientation(block_id)
+            positions["blocks"][block_name] = np.asarray(pos, dtype=np.float64).tolist()
+
+        return positions
+
     def _save_restart_snapshot(self, obs):
         """Capture full simulation + task state for exact restart."""
         env = self.env
@@ -208,11 +229,13 @@ class LanguageTableWorker:
 
         reward_rng_state = None
         reward_delay_steps = None
+        reward_state = None
         if env._reward_calculator is not None:
             reward_rng_state = env._reward_calculator._rng.get_state()
             reward_delay_steps = getattr(
                 env._reward_calculator, "_in_reward_zone_steps", None
             )
+            reward_state = copy.deepcopy(env._reward_calculator.__dict__)
 
         self._restart_python_state = {
             "target_effector_pose": copy.deepcopy(env._target_effector_pose),
@@ -230,6 +253,7 @@ class LanguageTableWorker:
             "target_relative_location": env._target_relative_location,
             "reward_rng_state": reward_rng_state,
             "reward_delay_steps": reward_delay_steps,
+            "reward_state": reward_state,
         }
 
 
@@ -364,8 +388,10 @@ class LanguageTableMultiProcessEnv:
         else:
             seeds = np.random.randint(2**16, 2**32 - 1, size=self.env_num)
 
-        seeds = np.repeat(seeds, self.group_n).tolist()
-
+        # seeds = np.repeat(seeds, self.group_n).tolist()
+        # DEBUG: set all seeds to 0
+        seeds = np.zeros(self.num_processes, dtype=int)
+        
         futures = [w.reset.remote(seed=s) for w, s in zip(self.workers, seeds)]
         results = ray.get(futures, timeout=self.timeout)
         obs_list, info_list = [], []
@@ -379,6 +405,11 @@ class LanguageTableMultiProcessEnv:
         if env_idx is not None:
             return ray.get(self.workers[env_idx].render.remote(), timeout=self.timeout)
         futures = [w.render.remote() for w in self.workers]
+        return ray.get(futures, timeout=self.timeout)
+
+    def get_object_positions(self):
+        """Return gripper and block positions for every worker env."""
+        futures = [w.get_object_positions.remote() for w in self.workers]
         return ray.get(futures, timeout=self.timeout)
 
     def restart(self):

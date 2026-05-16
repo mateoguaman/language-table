@@ -38,6 +38,7 @@ _ALLOWED_METHODS = frozenset({
     "close",
     "build_text_obs",
     "render",
+    "get_object_positions",
 })
 
 _TIMED_METHODS = frozenset({"reset", "step", "restart", "reflect"})

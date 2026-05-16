@@ -151,6 +151,17 @@ def _load_smolvla_policy(checkpoint_path, smolvla_port=50100, n_action_steps=1):
     return policy
 
 
+def _load_pink_noise_policy(seed=0, chunk_size=1):
+    """Load a dummy policy that broadcasts pink-noise actions."""
+    from language_table.policies.pink_noise import PinkNoisePolicy
+
+    logger.info(
+        "Loading pink-noise dummy policy (seed=%d, chunk_size=%d)",
+        seed, chunk_size,
+    )
+    return PinkNoisePolicy(seed=seed, chunk_size=chunk_size)
+
+
 def _create_env_pool(num_envs, group_n, block_mode, reward_factory_cls,
                      seed, render_obs, return_full_state):
     """Create a Ray-parallelized environment pool."""
@@ -177,6 +188,18 @@ def _resolve_chunk_size(args) -> int:
             )
         return 1
     return args.chunk_size
+
+
+def _load_policy_for_args(args, chunk_size):
+    """Load the configured low-level policy, if any."""
+    if args.policy == "pink_noise":
+        return _load_pink_noise_policy(args.seed, chunk_size)
+    if not args.vla_checkpoint:
+        return None
+    if args.policy == "smolvla":
+        return _load_smolvla_policy(
+            args.vla_checkpoint, args.smolvla_port, chunk_size)
+    return _load_vla_policy(args.vla_checkpoint, args.preprocess_mode)
 
 
 def _create_manager(
@@ -268,13 +291,7 @@ def _run_single(args):
     envs.reset()
     logger.info("All workers ready.")
 
-    vla_policy = None
-    if args.vla_checkpoint:
-        if args.policy == "smolvla":
-            vla_policy = _load_smolvla_policy(
-                args.vla_checkpoint, args.smolvla_port, chunk_size)
-        else:
-            vla_policy = _load_vla_policy(args.vla_checkpoint, args.preprocess_mode)
+    vla_policy = _load_policy_for_args(args, chunk_size)
 
     manager = _create_manager(
         envs, args, vla_policy, args.split, args.group_n,
@@ -306,14 +323,8 @@ def _run_unified(args):
     chunk_size = _resolve_chunk_size(args)
     render_obs = not args.no_render or args.vla_checkpoint is not None
 
-    # Load one shared VLA model
-    vla_policy = None
-    if args.vla_checkpoint:
-        if args.policy == "smolvla":
-            vla_policy = _load_smolvla_policy(
-                args.vla_checkpoint, args.smolvla_port, chunk_size)
-        else:
-            vla_policy = _load_vla_policy(args.vla_checkpoint, args.preprocess_mode)
+    # Load one shared low-level policy.
+    vla_policy = _load_policy_for_args(args, chunk_size)
 
     # Create train env pool
     logger.info(
@@ -411,7 +422,7 @@ def main():
                         choices=["original", "batched_tf", "jax_gpu"],
                         help="Image preprocessing strategy for LAVA _build_batch")
     parser.add_argument("--policy", type=str, default="lava",
-                        choices=["lava", "gemini", "smolvla"])
+                        choices=["lava", "gemini", "smolvla", "pink_noise"])
     parser.add_argument("--gemini_timeout", type=float, default=30.0)
     parser.add_argument("--smolvla_port", type=int, default=None,
                         help="TCP port for the SmolVLA policy subprocess server. "

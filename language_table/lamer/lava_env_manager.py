@@ -322,6 +322,10 @@ class LanguageTableEnvironmentManager:
         """RGB frames from each worker (``env.render(mode='rgb_array')``)."""
         return self.envs.render()
 
+    def get_object_positions(self):
+        """Return gripper and block positions for every environment."""
+        return self.envs.get_object_positions()
+
     def close(self):
         """Close all envs."""
         self.envs.close()
